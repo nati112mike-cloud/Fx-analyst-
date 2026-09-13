@@ -35,6 +35,11 @@ GitHub's own infrastructure:
   `docs/TELEGRAM.md` for creating the bot itself). Without them, it still
   runs and records results -- they're just visible only in the Actions
   logs and the committed database, not pushed to you.
+- A second workflow, `.github/workflows/telegram-listener.yml`, checks
+  every 5 minutes for a message you sent the bot and replies with a fresh
+  analysis on demand -- see "On-demand analysis: just message the bot" in
+  `docs/TELEGRAM.md`. It needs the same two secrets and otherwise does
+  nothing (no API calls at all) until they're set.
 - GitHub only fires `schedule` triggers from the workflow file as it
   exists on the repository's default branch -- if you rename or change
   the default branch, this workflow needs to live there too.

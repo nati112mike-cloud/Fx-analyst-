@@ -119,3 +119,25 @@ class TelegramNotifier:
         resp = requests.post(url, json={"chat_id": self.chat_id, "text": text}, timeout=15)
         resp.raise_for_status()
         return resp.json().get("ok", False)
+
+    def get_updates(self, offset: int | None = None) -> list[dict]:
+        """Short-poll for messages sent to the bot since `offset` (a Telegram
+        update_id, exclusive of anything already seen). Used by
+        fx_engine.telegram_listener to let the user request an on-demand
+        analysis by simply messaging the bot -- no long-lived connection
+        needed, so this is safe to call from a short-lived scheduled job.
+        """
+        if not self.is_configured:
+            raise RuntimeError(
+                "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set. Create a bot via @BotFather, "
+                "add both to your .env, and see docs/TELEGRAM.md."
+            )
+        import requests
+
+        url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
+        params = {"timeout": 0}
+        if offset is not None:
+            params["offset"] = offset
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json().get("result", [])

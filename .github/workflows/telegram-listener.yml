@@ -1,0 +1,64 @@
+name: FX on-demand Telegram analysis
+
+# Lets you request a fresh analysis any time by just messaging your
+# Telegram bot -- no dashboard, no GitHub UI, nothing to install. This job
+# checks every 5 minutes (the fastest schedule GitHub Actions allows) for
+# a new message from the chat configured in the TELEGRAM_CHAT_ID secret;
+# if there is one, it evaluates every pair right now (or just the pair(s)
+# named in the message, e.g. "EURUSD") and replies in the same chat --
+# including a NO TRADE reason when that's the honest answer, not just
+# actionable signals. See docs/TELEGRAM.md to set this up and
+# fx_engine/telegram_listener.py for how the matching works.
+#
+# Does nothing (exits immediately, no API calls) if Telegram isn't
+# configured yet -- safe to leave enabled either way.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fx-paper-trading  # same group as paper-trading.yml -- both commit
+                            # to data/paper_trading.sqlite3, so they must
+                            # never run at the same time.
+  cancel-in-progress: false
+
+env:
+  FX_DB_PATH: data/paper_trading.sqlite3
+  FX_DATA_PROVIDER: yahoo
+
+jobs:
+  telegram-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check for an on-demand request and reply
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          mkdir -p data
+          python -m fx_engine.main telegram-check
+
+      - name: Commit updated database
+        run: |
+          git config user.name "fx-signal-engine-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/paper_trading.sqlite3
+          git diff --cached --quiet || git commit -m "Telegram on-demand check $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push

@@ -5,6 +5,7 @@
     python -m fx_engine.main walk-forward --pair EURUSD --strategy trend_pullback
     python -m fx_engine.main signal-once --pair EURUSD
     python -m fx_engine.main paper --pairs EURUSD,GBPUSD --interval 900
+    python -m fx_engine.main telegram-check
     python -m fx_engine.main dashboard --port 8080
 """
 from __future__ import annotations
@@ -28,6 +29,7 @@ from fx_engine.paper_trading import PaperTradingLoop
 from fx_engine.signal_engine import NoTradeReason, SignalEngine
 from fx_engine.strategies import ALL_STRATEGIES, build_all
 from fx_engine.telegram_bot import TelegramNotifier
+from fx_engine.telegram_listener import check_and_respond
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -133,6 +135,21 @@ def cmd_paper(args) -> None:
         loop.run_forever()
 
 
+def cmd_telegram_check(args) -> None:
+    notifier = TelegramNotifier()
+    if not notifier.is_configured:
+        print("Telegram not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) -- nothing to check. "
+              "See docs/TELEGRAM.md.")
+        return
+    provider = get_provider(args.provider)
+    db = Database()
+    db.init_schema()
+    engine = SignalEngine(provider, db=db, notifier=notifier, min_signal_score=args.min_score)
+    pairs = args.pairs.split(",") if args.pairs else None
+    summary = check_and_respond(engine, notifier, pairs=pairs, timeframe=Timeframe(args.timeframe))
+    print(summary)
+
+
 def cmd_dashboard(args) -> None:
     from fx_engine.dashboard import create_app
 
@@ -191,6 +208,12 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("--news-csv", default="")
     common_data_args(pt)
     pt.set_defaults(func=cmd_paper)
+
+    tc = sub.add_parser("telegram-check", help="Check for an on-demand analysis request via Telegram and reply")
+    tc.add_argument("--pairs", default="", help="comma-separated; default is all of config.PAIRS")
+    tc.add_argument("--min-score", type=float, default=55.0)
+    common_data_args(tc)
+    tc.set_defaults(func=cmd_telegram_check)
 
     dash = sub.add_parser("dashboard", help="Run the local read-only dashboard over the database")
     dash.add_argument("--host", default="127.0.0.1")

@@ -33,3 +33,26 @@ same pair/direction from spamming multiple alerts within one timeframe
 window. `paper_trading.PaperTradingLoop` calls the signal engine on each
 poll cycle; the dedupe check is what keeps a persistent setup from
 re-alerting every cycle.
+
+## On-demand analysis: just message the bot
+
+Once the two secrets above are set, you don't have to wait for the
+scheduled paper-trading cycle to get a read on the market -- just send
+your bot any message (e.g. "analyze", or "what about GBPUSD") in Telegram.
+`.github/workflows/telegram-listener.yml` checks for new messages every 5
+minutes (the fastest schedule GitHub Actions allows) and, if the
+authorized chat (`TELEGRAM_CHAT_ID`) sent something since the last check,
+runs a fresh evaluation and replies in the same chat -- covering every
+configured pair by default, or just the pair(s) you name if your message
+mentions one (e.g. "EURUSD"). The reply always comes back, including a
+plain "NO TRADE -- <reason>" line for pairs that aren't actionable right
+now -- "why isn't it trading" is itself part of what was asked for, not
+just alerts when something fires.
+
+Only messages from `TELEGRAM_CHAT_ID` are ever acted on; anything else is
+silently ignored (see `fx_engine/telegram_listener.py`). Run it manually
+any time with:
+
+```bash
+python -m fx_engine.main telegram-check
+```

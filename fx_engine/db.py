@@ -95,6 +95,14 @@ CREATE TABLE IF NOT EXISTS system_health (
     message TEXT,
     checked_at TEXT NOT NULL
 );
+
+-- Small durable key/value store for cross-run state that isn't a first-class
+-- table of its own -- e.g. the Telegram getUpdates offset (fx_engine/telegram_listener.py),
+-- so a command from the user is never re-processed on the next scheduled check.
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -319,4 +327,17 @@ class Database:
             conn.execute(
                 "INSERT INTO system_health (component, status, message, checked_at) VALUES (?,?,?,?)",
                 (component, status, message, datetime.now(timezone.utc).isoformat()),
+            )
+
+    def get_state(self, key: str) -> str | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_state(self, key: str, value: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO app_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
             )
