@@ -1,0 +1,68 @@
+name: FX paper trading (forward test)
+
+# Runs the paper-trading loop once every 4 hours against real Yahoo data,
+# with no server, no local machine, and nothing installed anywhere on your
+# own computer -- GitHub runs it for free and commits the results (the
+# signal/paper-trade database) straight back into this repo.
+#
+# This is the honest next step after a backtest: it makes real, forward-
+# looking calls on data the strategies have never seen, and accumulates a
+# genuine track record over time -- exactly what a short backtest on
+# thin history cannot give you. See docs/DEPLOYMENT.md and
+# docs/LIMITATIONS.md before trusting anything it produces.
+#
+# Manual run: Actions tab -> "FX paper trading (forward test)" -> Run workflow.
+
+on:
+  schedule:
+    - cron: "15 */4 * * *"  # every 4 hours, offset to avoid GitHub's top-of-hour congestion
+  workflow_dispatch: {}
+
+permissions:
+  contents: write  # needed to commit the updated database back to the repo
+
+concurrency:
+  group: fx-paper-trading
+  cancel-in-progress: false  # never cancel a run mid-write to the database
+
+env:
+  FX_DB_PATH: data/paper_trading.sqlite3
+  FX_DATA_PROVIDER: yahoo
+
+jobs:
+  paper-trade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run one paper-trading cycle
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          mkdir -p data
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            echo "Telegram configured -- alerts will be sent."
+            python -m fx_engine.main paper --once --telegram
+          else
+            echo "No Telegram secrets set (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) -- printing to logs only."
+            echo "See docs/TELEGRAM.md to enable alerts, then add both as repo secrets."
+            python -m fx_engine.main paper --once
+          fi
+
+      - name: Commit updated database
+        run: |
+          git config user.name "fx-signal-engine-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/paper_trading.sqlite3
+          git diff --cached --quiet || git commit -m "Automated paper-trading cycle $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push

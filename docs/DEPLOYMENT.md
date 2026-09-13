@@ -15,6 +15,42 @@ terminal has to actually be running and logged in at all times; this is
 the real operational cost of using Exness's data/execution, not a detail
 to skip.
 
+## Zero-install option: GitHub Actions (no server, no local machine)
+
+If you don't have an always-on machine at all -- no VPS, no PC that can
+run Python -- `.github/workflows/paper-trading.yml` runs the signal-only
+(`FX_DATA_PROVIDER=yahoo`) paper-trading loop for you, for free, on
+GitHub's own infrastructure:
+
+- Runs one evaluation cycle (`python -m fx_engine.main paper --once`)
+  every 4 hours on a GitHub-hosted runner, on a schedule (`cron`), plus
+  a manual "Run workflow" button on the Actions tab any time.
+- Commits the resulting `data/paper_trading.sqlite3` back into the repo
+  after each run, so signal/paper-trade history accumulates just like it
+  would on a long-running local loop -- there's simply no process to keep
+  alive yourself.
+- Sends Telegram alerts automatically once you add `TELEGRAM_BOT_TOKEN`
+  and `TELEGRAM_CHAT_ID` as repo secrets (Settings -> Secrets and
+  variables -> Actions -> New repository secret; see
+  `docs/TELEGRAM.md` for creating the bot itself). Without them, it still
+  runs and records results -- they're just visible only in the Actions
+  logs and the committed database, not pushed to you.
+- GitHub only fires `schedule` triggers from the workflow file as it
+  exists on the repository's default branch -- if you rename or change
+  the default branch, this workflow needs to live there too.
+
+To see what it's doing: the repo's **Actions** tab lists every run, its
+logs, and whether it succeeded. To see the accumulated results in the
+dashboard instead of raw logs, point the dashboard at the committed file:
+
+```bash
+FX_DB_PATH=data/paper_trading.sqlite3 python -m fx_engine.main dashboard
+```
+
+This is the `yahoo`-only path (Section "Two deployment shapes" above) --
+it cannot do the `mt5`/Exness path, since that needs a live, logged-in
+Windows MT5 terminal, which a GitHub-hosted runner can't provide.
+
 ## Running the loop
 
 ```bash

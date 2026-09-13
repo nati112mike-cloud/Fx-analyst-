@@ -2,6 +2,10 @@ __pycache__/
 *.pyc
 .env
 *.sqlite3
+# Exception: the GitHub Actions paper-trading workflow persists its
+# database at this exact path by committing it back to the repo -- see
+# .github/workflows/paper-trading.yml and docs/DEPLOYMENT.md.
+!data/paper_trading.sqlite3
 .venv/
 venv/
 .pytest_cache/
