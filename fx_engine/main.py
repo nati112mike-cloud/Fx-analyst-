@@ -151,10 +151,16 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--provider", default=config.DATA_PROVIDER, choices=["synthetic", "yahoo", "mt5"])
         sp.add_argument("--timeframe", default="H4", choices=[t.value for t in Timeframe])
 
+    # Default --start is 350 days back: safely inside Yahoo's real, live-
+    # confirmed ~365-day intraday (H1/H4) data-age limit (see
+    # fx_engine/data/providers.py and docs/PERFORMANCE.md) -- a longer
+    # default would silently get clipped forward for --provider yahoo at
+    # the default --timeframe H4. --provider synthetic/mt5 aren't affected
+    # by this; pass --timeframe D1 explicitly for older history on yahoo.
     bt = sub.add_parser("backtest", help="Backtest one or all strategies on one pair")
     bt.add_argument("--pair", required=True)
     bt.add_argument("--strategy", default="all", choices=list(ALL_STRATEGIES.keys()) + ["all"])
-    bt.add_argument("--start", default=(datetime.now(timezone.utc) - timedelta(days=730)).date().isoformat())
+    bt.add_argument("--start", default=(datetime.now(timezone.utc) - timedelta(days=350)).date().isoformat())
     bt.add_argument("--end", default=datetime.now(timezone.utc).date().isoformat())
     bt.add_argument("--save", action="store_true", help="persist results to the database")
     common_data_args(bt)
@@ -163,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     wf = sub.add_parser("walk-forward", help="Walk-forward / holdout validation for one strategy")
     wf.add_argument("--pair", required=True)
     wf.add_argument("--strategy", required=True, choices=list(ALL_STRATEGIES.keys()))
-    wf.add_argument("--start", default=(datetime.now(timezone.utc) - timedelta(days=730)).date().isoformat())
+    wf.add_argument("--start", default=(datetime.now(timezone.utc) - timedelta(days=350)).date().isoformat())
     wf.add_argument("--end", default=datetime.now(timezone.utc).date().isoformat())
     wf.add_argument("--save", action="store_true")
     common_data_args(wf)

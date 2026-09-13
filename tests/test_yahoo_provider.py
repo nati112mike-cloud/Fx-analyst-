@@ -43,6 +43,32 @@ def _make_payload(start: datetime, n_bars: int, step_seconds: int, base_price: f
     }
 
 
+_FIXED_NOW = datetime(2022, 10, 1, tzinfo=timezone.utc)
+
+
+class _FixedDatetime(datetime):
+    """Real datetime subclass (so fromtimestamp/arithmetic/etc keep working
+    normally) with `.now()` pinned -- tests that use specific historical
+    dates must not depend on how old those dates happen to be relative to
+    whatever day the suite is actually run on, now that get_ohlc() clips
+    request start dates based on their age relative to real `datetime.now()`."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return _FIXED_NOW
+
+
+class _FixedDatetimeLate(datetime):
+    """Same idea as _FixedDatetime, but pinned safely after a wider
+    historical range -- for tests that exercise multi-year chunking and
+    need `now` to sit comfortably past the whole requested range so age
+    clipping (a separate mechanism, tested on its own) never triggers."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2024, 6, 1, tzinfo=timezone.utc)
+
+
 def _mock_response(payload: dict, status_code: int = 200) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status_code
@@ -79,8 +105,9 @@ class TestYahooProviderParsing(unittest.TestCase):
         self.assertAlmostEqual(df["close"].iloc[0], 1.0850, places=4)
 
     @patch("requests.get")
+    @patch("fx_engine.data.providers.datetime", _FixedDatetime)
     def test_h4_request_resamples_from_60m(self, mock_get):
-        start = datetime(2023, 1, 2, tzinfo=timezone.utc)
+        start = _FIXED_NOW - timedelta(days=5)  # comfortably within the age window
         # 40 hourly bars -> should resample down to ~10 4-hour bars
         payload = _make_payload(start, n_bars=40, step_seconds=3600)
         mock_get.return_value = _mock_response(payload)
@@ -122,10 +149,17 @@ class TestYahooProviderParsing(unittest.TestCase):
         self.assertIn("network policy", str(ctx.exception))
 
     @patch("requests.get")
-    def test_multiyear_h1_request_is_chunked_and_concatenated(self, mock_get):
-        # 3 years exceeds the ~728-day max lookback for 60m bars -> must chunk.
-        start = datetime(2021, 1, 1, tzinfo=timezone.utc)
-        end = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    @patch("fx_engine.data.providers.datetime", _FixedDatetimeLate)
+    def test_long_h1_request_within_age_window_is_chunked_and_concatenated(self, mock_get):
+        # A ~300-day 60m request, entirely within the (now-known-real)
+        # 365-day intraday age window relative to `now`, but still wider
+        # than one 90-day chunk -- must still be split and concatenated.
+        # (A true multi-year H1 span, as this test originally used, is no
+        # longer realistic to request from Yahoo at all -- see the age-
+        # clipping tests below and docs/PERFORMANCE.md for why.)
+        now = datetime(2024, 6, 1, tzinfo=timezone.utc)
+        start = now - timedelta(days=300)
+        end = now - timedelta(days=10)
 
         def side_effect(*args, **kwargs):
             p1 = kwargs["params"]["period1"]
@@ -137,11 +171,12 @@ class TestYahooProviderParsing(unittest.TestCase):
         mock_get.side_effect = side_effect
         df = self.provider.get_ohlc("EURUSD", Timeframe.H1, start, end)
 
-        self.assertGreaterEqual(mock_get.call_count, 2, "a 3-year 60m request must be split into multiple chunks")
+        self.assertGreaterEqual(mock_get.call_count, 2, "a ~300-day 60m request must be split into multiple chunks")
         self.assertTrue(df.index.is_monotonic_increasing)
         self.assertFalse(df.index.duplicated().any())
 
     @patch("requests.get")
+    @patch("fx_engine.data.providers.datetime", _FixedDatetime)
     def test_422_too_long_range_is_bisected_and_recovers(self, mock_get):
         # Reproduces the real failure hit in practice: Yahoo returning 422
         # for a range this provider's own _MAX_LOOKBACK_DAYS guess allowed
@@ -176,6 +211,7 @@ class TestYahooProviderParsing(unittest.TestCase):
             self.assertTrue(span_days <= reject_threshold_days or span_days > reject_threshold_days)
 
     @patch("requests.get")
+    @patch("fx_engine.data.providers.datetime", _FixedDatetime)
     def test_422_that_never_recovers_raises_valueerror_not_infinite_loop(self, mock_get):
         mock_get.return_value = _mock_response({}, status_code=422)
         with self.assertRaises(ValueError) as ctx:
@@ -185,6 +221,75 @@ class TestYahooProviderParsing(unittest.TestCase):
         self.assertIn("rejected", str(ctx.exception).lower())
         # must terminate (bounded by _MAX_BISECTION_DEPTH), not hang or retry forever
         self.assertLess(mock_get.call_count, 5000)
+
+
+class TestIntradayAgeClipping(unittest.TestCase):
+    """Reproduces the second real bug found live: Yahoo rejects intraday
+    (60m) requests whose START is too far in the past, regardless of how
+    narrow the window is -- a separate constraint from the span limit
+    above, which bisection alone cannot fix."""
+
+    def setUp(self):
+        self.provider = YahooFinanceProvider()
+        self.sleep_patch = patch("fx_engine.data.providers.time.sleep", return_value=None)
+        self.sleep_patch.start()
+        self.addCleanup(self.sleep_patch.stop)
+
+    @patch("requests.get")
+    @patch("fx_engine.data.providers.datetime", _FixedDatetime)
+    def test_old_start_is_clipped_forward_and_request_succeeds(self, mock_get):
+        # _FIXED_NOW = 2022-10-01, 60m age limit = 365 days -> earliest = 2021-10-01.
+        # Request starting in 2019 (years before that) must get clipped, not rejected outright.
+        requested_start = datetime(2019, 1, 1, tzinfo=timezone.utc)
+        requested_end = datetime(2019, 3, 1, tzinfo=timezone.utc)  # still entirely too old
+
+        # Once clipped forward, start would be AFTER end -- this is the
+        # "entire range too old" case, which must raise a clear ValueError
+        # rather than silently return no data or crash confusingly.
+        with self.assertRaises(ValueError) as ctx:
+            self.provider.get_ohlc("EURUSD", Timeframe.H1, requested_start, requested_end)
+        self.assertIn("older than yahoo", str(ctx.exception).lower())
+        mock_get.assert_not_called()  # never even tries a request for a range that can't possibly work
+
+    @patch("requests.get")
+    @patch("fx_engine.data.providers.datetime", _FixedDatetime)
+    def test_partially_old_range_clips_start_and_fetches_remainder(self, mock_get):
+        # start is way too old, but end is recent enough that clipped_start < end.
+        requested_start = datetime(2018, 1, 1, tzinfo=timezone.utc)
+        requested_end = datetime(2022, 9, 1, tzinfo=timezone.utc)  # within the 365-day window of _FIXED_NOW
+
+        captured_starts = []
+
+        def side_effect(*args, **kwargs):
+            p1, p2 = kwargs["params"]["period1"], kwargs["params"]["period2"]
+            captured_starts.append(p1)
+            chunk_start = datetime.fromtimestamp(p1, tz=timezone.utc)
+            n_hours = max(1, int((p2 - p1) // 3600))
+            return _mock_response(_make_payload(chunk_start, n_bars=min(n_hours, 2000), step_seconds=3600))
+
+        mock_get.side_effect = side_effect
+        df = self.provider.get_ohlc("EURUSD", Timeframe.H1, requested_start, requested_end)
+
+        earliest_allowed = _FIXED_NOW - timedelta(days=365)
+        self.assertTrue(mock_get.called)
+        # not one single request should have asked for data older than the clip point
+        for p1 in captured_starts:
+            self.assertGreaterEqual(p1, int(earliest_allowed.timestamp()) - 1)
+        self.assertFalse(df.empty)
+
+    @patch("requests.get")
+    @patch("fx_engine.data.providers.datetime", _FixedDatetime)
+    def test_daily_bars_are_never_age_clipped(self, mock_get):
+        # Daily bars have no age limit (_MAX_AGE_DAYS["1d"] is None) --
+        # a request from a decade ago must pass start through unchanged.
+        requested_start = datetime(2012, 1, 1, tzinfo=timezone.utc)
+        requested_end = datetime(2012, 3, 1, tzinfo=timezone.utc)
+        mock_get.return_value = _mock_response(_make_payload(requested_start, n_bars=59, step_seconds=86400))
+
+        self.provider.get_ohlc("EURUSD", Timeframe.D1, requested_start, requested_end)
+
+        p1 = mock_get.call_args.kwargs["params"]["period1"]
+        self.assertEqual(p1, int(requested_start.timestamp()))  # unchanged, not clipped
 
 
 if __name__ == "__main__":

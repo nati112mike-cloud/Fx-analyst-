@@ -82,8 +82,51 @@ range that's rejected at every size terminating in a clear `ValueError`
 This is the project's first genuinely live-verified fix -- not just
 offline-tested against an assumed schema, but caught from a real failure
 against the real endpoint, exactly the gap `docs/LIMITATIONS.md` flagged
-before this. Still not exercised live: true multi-year chunking end-to-end,
-and daily-bar (`1d`) requests.
+before this.
+
+**A second live bug followed within the same debugging session.** After
+the bisection fix shipped, the user re-ran the exact same walk-forward
+command and got a NEW failure: bisection correctly kept halving the
+range (visible in the logs: 12 months -> 6 -> 3 -> ~6 weeks -> ~3 weeks
+-> ~9 days -> ~4.5 days -> ~2.25 days -> ~1.1 days), and Yahoo rejected
+every single one of those, all the way down. That ruled out "span too
+wide" as the (sole) explanation -- the real constraint is an AGE cutoff:
+Yahoo doesn't serve 60-minute bars starting from January 2022 at all,
+regardless of how narrow the request window is, because that start date
+is too far in the past for hourly granularity, full stop.
+
+Fixed: `get_ohlc()` now clips the requested `start` forward to
+`_MAX_AGE_DAYS` (a conservative 365-day guess for 60m) before span-based
+chunking even begins, logging a warning when it does, and raises a clear,
+specific error only when the *entire* requested range predates that
+cutoff. The `_MAX_LOOKBACK_DAYS` span guess was also reduced from 360 to
+90 days, since the true span limit is still unconfirmed (every rejection
+observed so far could be explained by the age cutoff alone) and a smaller
+conservative chunk size makes multi-chunk requests meaningfully
+exercisable within the now-much-narrower 365-day realistic window.
+`tests/test_yahoo_provider.py` gained three more tests for this exact
+failure mode, and two existing tests had to be corrected to use a fixed,
+controlled `datetime.now()` instead of depending on the real wall-clock
+date -- both had accidentally been asserting behavior that depended on
+how old their hardcoded 2021-2023 test dates happened to be relative to
+whatever day the suite was actually run on, which the new age-clipping
+logic made a real determinism problem, not just a style nit.
+
+**The practical, load-bearing consequence**: an H1/H4 backtest against
+`--provider yahoo` can only ever cover roughly the last year, not an
+arbitrary historical range -- that's a real, permanent constraint of
+Yahoo's free intraday data, not a bug to route around further. The CLI's
+default `--start` moved from 730 to 350 days back, and the Colab
+notebook's fixed 2022-2024 dates were replaced with a range computed at
+run time (`datetime.now() - 350 days` to `now`), so it keeps working as
+real calendar time passes instead of going stale again the way the
+original "~730 days" span guess already had.
+
+Two real bugs, found and fixed within minutes of each other, purely
+because a live run happened at all -- exactly the value of actually
+running this rather than only trusting the offline-mocked test suite.
+Still not exercised live: daily-bar (`1d`) requests, and whether 90
+days/365 days are exactly right or just conservative enough to work.
 
 ## MT5/Exness adapter: hardened and offline-tested, not live-tested
 

@@ -173,16 +173,34 @@ class YahooFinanceProvider(HistoricalDataProvider):
     here), so `_fetch_chunk` no longer retries it -- instead
     `get_ohlc` catches `_RangeRejected` and bisects the offending range
     in half, recursively, until each half is accepted. This makes the
-    provider self-correcting against whatever Yahoo's real current limit
-    is, rather than hard-coding a guess that can silently go stale again.
-    Daily bars have no such practical limit for the ranges this project uses.
+    provider self-correcting against whatever Yahoo's real current SPAN
+    limit is, rather than hard-coding a guess that can silently go stale.
+
+    Separately -- and this one bisection alone cannot fix -- Yahoo also
+    enforces an AGE cutoff for intraday bars, measured back from today,
+    independent of the span limit: a request for 60-minute bars starting
+    years ago is rejected no matter how narrow the window is (also
+    confirmed live; see docs/PERFORMANCE.md). `get_ohlc` clips `start`
+    forward to `_MAX_AGE_DAYS` before chunking, logging a warning when it
+    does, rather than let every chunk fail identically for the wrong
+    reason. Daily bars have no such practical limit for the ranges this
+    project uses.
     """
 
     name = "yahoo"
     _INTERVAL = {Timeframe.M15: "15m", Timeframe.H1: "60m", Timeframe.H4: "60m", Timeframe.D1: "1d"}
     # Starting guesses only -- kept conservative so the common case needs no
     # bisection at all; _RangeRejected handles it self-correcting either way.
-    _MAX_LOOKBACK_DAYS = {"15m": 58, "60m": 360, "1d": 36500}
+    # Note: the true per-request SPAN limit for 60m is still unconfirmed
+    # (every live rejection seen so far could equally be explained by the
+    # AGE cutoff below, since the start dates tested were always old) --
+    # 90 is a deliberately conservative guess given that uncertainty.
+    _MAX_LOOKBACK_DAYS = {"15m": 58, "60m": 90, "1d": 36500}
+    # How far back from TODAY intraday bars are available at all -- confirmed
+    # live to be a real, separate constraint from the per-request span limit
+    # above (see class docstring). Kept conservative; None = no age limit
+    # (daily bars).
+    _MAX_AGE_DAYS = {"15m": 60, "60m": 365, "1d": None}
     _RETRY_ATTEMPTS = 4
     _RETRY_BACKOFF_SECONDS = 2.0
     _MAX_BISECTION_DEPTH = 8
@@ -247,7 +265,10 @@ class YahooFinanceProvider(HistoricalDataProvider):
             if depth >= self._MAX_BISECTION_DEPTH or (end - start) <= timedelta(hours=4):
                 raise ValueError(
                     f"Yahoo rejected {symbol} {interval} even for a short range ({start}..{end}) -- "
-                    "this isn't a range-length problem, something else is wrong (bad symbol or interval)."
+                    "this isn't a range-length problem. Most likely this date range is simply too "
+                    "old for Yahoo's intraday data at this interval (try a more recent start date, "
+                    "or use Timeframe.D1 for older history) -- or the symbol/interval combination "
+                    "itself is invalid."
                 )
             mid = start + (end - start) / 2
             logger.info("Yahoo rejected %s %s %s..%s as too long -- bisecting at %s", symbol, interval, start, end, mid)
@@ -265,6 +286,31 @@ class YahooFinanceProvider(HistoricalDataProvider):
         interval = self._INTERVAL[timeframe]
         symbol = self._symbol(pair)
         max_days = self._MAX_LOOKBACK_DAYS[interval]
+
+        # Confirmed live (see docs/PERFORMANCE.md): Yahoo's intraday-bar
+        # limit is an AGE cutoff measured from today, not just a max SPAN
+        # per request -- a request for 60m bars starting years ago gets
+        # rejected no matter how narrow the window is, because bisection
+        # keeps the same old start date. Clip the start date forward to
+        # the (conservative) intraday availability window before chunking,
+        # rather than let every chunk fail identically for the wrong reason.
+        max_age_days = self._MAX_AGE_DAYS.get(interval)
+        if max_age_days is not None:
+            earliest_available = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            if start < earliest_available:
+                logger.warning(
+                    "%s %s: requested start %s is older than Yahoo's intraday data window for "
+                    "this interval (~%d days back) -- clipping to %s. For history older than "
+                    "that, use Timeframe.D1 (daily bars aren't limited this way).",
+                    symbol, interval, start.date(), max_age_days, earliest_available.date(),
+                )
+                start = earliest_available
+            if start >= end:
+                raise ValueError(
+                    f"{symbol} {interval}: the entire requested range is older than Yahoo's "
+                    f"~{max_age_days}-day intraday data window. Use Timeframe.D1 for history "
+                    "this old, or request a more recent date range."
+                )
 
         chunks: list[pd.DataFrame] = []
         chunk_start = start

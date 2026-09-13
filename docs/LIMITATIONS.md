@@ -39,10 +39,33 @@ silently go stale again. Verified in `tests/test_yahoo_provider.py`
 series; a range that's rejected no matter how far it's split terminates
 with a clear error rather than hanging or retrying forever).
 
-Genuinely unverified still: chunking/bisection across a true multi-year
-request against the live endpoint (the Colab run that found this bug used
-a shorter range), and daily-bar (`1d`) requests, which weren't exercised
-live yet either.
+**A second, distinct live bug followed immediately after fixing the
+first**: even after bisection kicked in correctly and kept halving the
+requested range, Yahoo kept rejecting it all the way down to a ~1-day
+window -- because the real constraint isn't just "span too wide," it's
+"start date too old." Yahoo apparently only serves 60-minute bars for
+roughly the last year, full stop, regardless of how narrow a single
+request is. Bisection alone can never fix that (it always keeps the same,
+too-old `start`). Fixed: `get_ohlc()` now clips `start` forward to
+`_MAX_AGE_DAYS` (365 days for 60m, conservative) before chunking, with a
+logged warning when it does, and raises a clear error only if the entire
+requested range is older than that. `tests/test_yahoo_provider.py` covers
+clipping a partially-old range, rejecting an entirely-old one, and
+confirming daily bars (`1d`, no age limit) pass `start` through unchanged.
+
+**Practical consequence**: an H1/H4 backtest against `--provider yahoo`
+can only ever cover roughly the last year, not an arbitrary fixed
+historical range like "2022-2024" -- that range simply ages out of what
+Yahoo serves at hourly granularity as calendar time passes. The CLI's
+default `--start` was changed from 730 to 350 days back precisely because
+of this (see `fx_engine/main.py`). For a longer lookback, use
+`--timeframe D1` (daily bars have no such limit) instead of H1/H4.
+
+Genuinely unverified still: daily-bar (`1d`) requests against the live
+endpoint (only exercised offline so far), and whether the 90-day
+per-request SPAN guess and 365-day AGE guess are exactly right or just
+conservative enough to work -- both are still guesses bisection/clipping
+can self-correct around, not confirmed-exact figures.
 
 ## Synthetic data has no real market structure
 
