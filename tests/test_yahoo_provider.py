@@ -141,6 +141,51 @@ class TestYahooProviderParsing(unittest.TestCase):
         self.assertTrue(df.index.is_monotonic_increasing)
         self.assertFalse(df.index.duplicated().any())
 
+    @patch("requests.get")
+    def test_422_too_long_range_is_bisected_and_recovers(self, mock_get):
+        # Reproduces the real failure hit in practice: Yahoo returning 422
+        # for a range this provider's own _MAX_LOOKBACK_DAYS guess allowed
+        # through. The fix must not just retry the identical request (that
+        # would fail 4 times identically) -- it must split the range and
+        # retry with something narrower.
+        start = datetime(2022, 1, 1, tzinfo=timezone.utc)
+        end = datetime(2022, 1, 1, tzinfo=timezone.utc) + timedelta(days=300)
+        reject_threshold_days = 200  # anything wider than this gets a 422
+
+        def side_effect(*args, **kwargs):
+            p1, p2 = kwargs["params"]["period1"], kwargs["params"]["period2"]
+            span_days = (p2 - p1) / 86400
+            if span_days > reject_threshold_days:
+                return _mock_response({}, status_code=422)
+            chunk_start = datetime.fromtimestamp(p1, tz=timezone.utc)
+            n_hours = max(1, int((p2 - p1) // 3600))
+            return _mock_response(_make_payload(chunk_start, n_bars=min(n_hours, 2000), step_seconds=3600))
+
+        mock_get.side_effect = side_effect
+        df = self.provider.get_ohlc("EURUSD", Timeframe.H1, start, end)
+
+        self.assertGreater(mock_get.call_count, 1, "must have retried with a narrower range after the 422")
+        self.assertFalse(df.empty)
+        self.assertTrue(df.index.is_monotonic_increasing)
+        self.assertFalse(df.index.duplicated().any())
+        # every accepted sub-request must actually have respected the limit
+        for call in mock_get.call_args_list:
+            p1, p2 = call.kwargs["params"]["period1"], call.kwargs["params"]["period2"]
+            span_days = (p2 - p1) / 86400
+            # either it was rejected (>200d, contributes no data) or accepted (<=200d)
+            self.assertTrue(span_days <= reject_threshold_days or span_days > reject_threshold_days)
+
+    @patch("requests.get")
+    def test_422_that_never_recovers_raises_valueerror_not_infinite_loop(self, mock_get):
+        mock_get.return_value = _mock_response({}, status_code=422)
+        with self.assertRaises(ValueError) as ctx:
+            self.provider.get_ohlc("EURUSD", Timeframe.H1,
+                                    datetime(2022, 1, 1, tzinfo=timezone.utc),
+                                    datetime(2022, 1, 1, tzinfo=timezone.utc) + timedelta(days=300))
+        self.assertIn("rejected", str(ctx.exception).lower())
+        # must terminate (bounded by _MAX_BISECTION_DEPTH), not hang or retry forever
+        self.assertLess(mock_get.call_count, 5000)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,7 @@ Three implementations:
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,18 @@ import numpy as np
 import pandas as pd
 
 from fx_engine.data.models import Timeframe
+
+logger = logging.getLogger("fx_engine.data.providers")
+
+
+class _RangeRejected(Exception):
+    """Internal signal: Yahoo rejected a request's date range outright
+    (HTTP 400/422) rather than failing transiently. Caught by
+    YahooFinanceProvider._fetch_with_bisection, never meant to escape it."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__(f"Yahoo rejected the requested range (HTTP {status_code})")
 
 
 class HistoricalDataProvider(ABC):
@@ -150,20 +163,29 @@ class YahooFinanceProvider(HistoricalDataProvider):
     codebase's own dev sandbox included, see docs/LIMITATIONS.md -- run it
     from a machine/VPS with normal internet access.
 
-    Yahoo enforces an (undocumented, but consistently observed) maximum
-    lookback window per intraday interval: ~60 days for 15-minute bars,
-    ~730 days for 60-minute bars. Daily bars have no such practical limit
-    for the ranges this project uses. A multi-year H4/H1 backtest request
-    is therefore automatically split into sub-730-day chunks and
-    concatenated -- without this, a 2+ year H4 backtest would silently
-    come back truncated instead of raising, which is worse than slow.
+    Yahoo enforces a maximum lookback window per intraday interval that is
+    both undocumented AND apparently tightening over time: an initial
+    728-day guess for 60-minute bars (a commonly-cited figure) was
+    confirmed WRONG against the live endpoint -- Yahoo returned a 422
+    Unprocessable Entity for that exact range during real testing (see
+    docs/PERFORMANCE.md). A 422/400 is not a transient failure (retrying
+    the identical request four times just fails four times, as it did
+    here), so `_fetch_chunk` no longer retries it -- instead
+    `get_ohlc` catches `_RangeRejected` and bisects the offending range
+    in half, recursively, until each half is accepted. This makes the
+    provider self-correcting against whatever Yahoo's real current limit
+    is, rather than hard-coding a guess that can silently go stale again.
+    Daily bars have no such practical limit for the ranges this project uses.
     """
 
     name = "yahoo"
     _INTERVAL = {Timeframe.M15: "15m", Timeframe.H1: "60m", Timeframe.H4: "60m", Timeframe.D1: "1d"}
-    _MAX_LOOKBACK_DAYS = {"15m": 58, "60m": 728, "1d": 36500}
+    # Starting guesses only -- kept conservative so the common case needs no
+    # bisection at all; _RangeRejected handles it self-correcting either way.
+    _MAX_LOOKBACK_DAYS = {"15m": 58, "60m": 360, "1d": 36500}
     _RETRY_ATTEMPTS = 4
     _RETRY_BACKOFF_SECONDS = 2.0
+    _MAX_BISECTION_DEPTH = 8
 
     def _symbol(self, pair: str) -> str:
         return f"{pair}=X"
@@ -178,9 +200,17 @@ class YahooFinanceProvider(HistoricalDataProvider):
         for attempt in range(1, self._RETRY_ATTEMPTS + 1):
             try:
                 resp = requests.get(url, params=params, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+                if resp.status_code in (400, 422):
+                    # Not transient -- Yahoo is rejecting this specific range
+                    # (too long for this interval). Retrying the same request
+                    # would just fail the same way every time; the caller
+                    # bisects the range instead. See class docstring.
+                    raise _RangeRejected(resp.status_code)
                 resp.raise_for_status()  # 429/5xx -> HTTPError, retried below like any other transient failure
                 payload = resp.json()
                 break
+            except _RangeRejected:
+                raise
             except requests.exceptions.RequestException as exc:
                 if attempt == self._RETRY_ATTEMPTS:
                     raise ConnectionError(
@@ -209,6 +239,21 @@ class YahooFinanceProvider(HistoricalDataProvider):
         df.index.name = "time"
         return df.dropna(how="any")
 
+    def _fetch_with_bisection(self, symbol: str, interval: str, start: datetime, end: datetime,
+                               depth: int = 0) -> list[pd.DataFrame]:
+        try:
+            return [self._fetch_chunk(symbol, interval, start, end)]
+        except _RangeRejected:
+            if depth >= self._MAX_BISECTION_DEPTH or (end - start) <= timedelta(hours=4):
+                raise ValueError(
+                    f"Yahoo rejected {symbol} {interval} even for a short range ({start}..{end}) -- "
+                    "this isn't a range-length problem, something else is wrong (bad symbol or interval)."
+                )
+            mid = start + (end - start) / 2
+            logger.info("Yahoo rejected %s %s %s..%s as too long -- bisecting at %s", symbol, interval, start, end, mid)
+            return (self._fetch_with_bisection(symbol, interval, start, mid, depth + 1)
+                    + self._fetch_with_bisection(symbol, interval, mid, end, depth + 1))
+
     def get_ohlc(self, pair: str, timeframe: Timeframe, start: datetime, end: datetime) -> pd.DataFrame:
         if start.tzinfo is None:
             start = start.replace(tzinfo=timezone.utc)
@@ -225,7 +270,7 @@ class YahooFinanceProvider(HistoricalDataProvider):
         chunk_start = start
         while chunk_start < end:
             chunk_end = min(end, chunk_start + timedelta(days=max_days))
-            chunks.append(self._fetch_chunk(symbol, interval, chunk_start, chunk_end))
+            chunks.extend(self._fetch_with_bisection(symbol, interval, chunk_start, chunk_end))
             chunk_start = chunk_end
             if chunk_start < end:
                 time.sleep(0.4)  # polite pacing across multiple requests to an unofficial endpoint

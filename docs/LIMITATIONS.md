@@ -13,26 +13,36 @@ it is **not** Exness's actual historical bid/ask. Once the MT5 adapter is
 connected (`docs/EXNESS_INTEGRATION.md`), real spread should replace this
 for any backtest whose absolute numbers you intend to act on.
 
-## Yahoo integration is hardened but unverified against the live endpoint
+## Yahoo integration: now verified against the live endpoint, one real bug found and fixed
 
-`YahooFinanceProvider` (`fx_engine/data/providers.py`) now handles the
-things that would otherwise bite you the first time you actually used it:
-Yahoo's undocumented per-interval lookback limits (~60 days for 15m bars,
-~730 days for 60m bars) are respected by automatically splitting a
-multi-year H1/H4 request into sub-limit chunks and concatenating them,
-transient failures (connection errors, 429s, 5xx) retry with backoff, and
-a persistent failure raises a clear `ConnectionError` that explicitly
-names "network policy" as a possible cause rather than looking like a
-code bug. All of this was verified with `tests/test_yahoo_provider.py`
-against a realistic **mocked** Yahoo chart-API response, matching the
-real documented JSON schema -- because this sandbox's outbound access to
-`query1.finance.yahoo.com` is blocked at the network-policy level
-(confirmed: `CONNECT tunnel failed, response 403`, not a timeout or a
-transient error), the actual live endpoint has never been hit from here.
-Run `python -m fx_engine.main backtest --provider yahoo ...` from a
-machine with normal internet access to complete that verification --
-if Yahoo has changed their response schema since this was written, that
-run is where you'd find out.
+`YahooFinanceProvider` (`fx_engine/data/providers.py`) was first built and
+tested only against a mocked Yahoo response, since this sandbox's own
+outbound access to `query1.finance.yahoo.com` is blocked at the network-policy
+level. It has since actually been run against the real endpoint -- from Google
+Colab (a free, no-install way to run this: upload the project and a
+ready-made notebook, no Python setup needed on your own machine) -- and
+that run surfaced a real bug: the documented
+"~730 days is Yahoo's max lookback for 60-minute bars" figure (a commonly
+cited number) is wrong, or has gone stale; Yahoo returned a 422
+Unprocessable Entity for a 728-day request. Worse, the original retry
+logic treated this as a transient failure and retried the *identical*
+request four times, which fails identically four times and wastes time
+for nothing.
+
+Fixed: a 400/422 response is no longer retried -- it's treated as "this
+specific date range was rejected," and `get_ohlc()` bisects the range in
+half and retries each half, recursively, until Yahoo accepts each piece.
+This makes the provider self-correcting against whatever Yahoo's real
+current limit actually is, rather than hard-coding a number that can
+silently go stale again. Verified in `tests/test_yahoo_provider.py`
+(bisection recovers and produces a complete, gap-free, duplicate-free
+series; a range that's rejected no matter how far it's split terminates
+with a clear error rather than hanging or retrying forever).
+
+Genuinely unverified still: chunking/bisection across a true multi-year
+request against the live endpoint (the Colab run that found this bug used
+a shorter range), and daily-bar (`1d`) requests, which weren't exercised
+live yet either.
 
 ## Synthetic data has no real market structure
 

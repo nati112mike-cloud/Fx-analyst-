@@ -50,22 +50,40 @@ completed in well under a minute.
 - Signals persisted correctly to SQLite (`signals` table) with a real UUID,
   retrievable via `Database`.
 
-## Yahoo integration: hardened and offline-tested, not yet live-tested
+## Yahoo integration: live-tested via Colab, one real bug found and fixed
 
 `YahooFinanceProvider` was rewritten to handle Yahoo's per-interval
-lookback limits (auto-chunking multi-year H1/H4 requests), retry
-transient failures with backoff, and fail with a clear, diagnosable error
-rather than silently truncated data. `tests/test_yahoo_provider.py`
-verifies all of this -- parsing, chunking into the correct number of
-requests, concatenation without duplicates/gaps, retry-then-recover, and
-the final-failure error message -- against a mocked response built to the
-real documented Yahoo chart-API schema. Confirmed during this same
-session: `query1.finance.yahoo.com` and `query2.finance.yahoo.com` both
-return `CONNECT tunnel failed, response 403` from this sandbox --  an
-organization network-policy denial, not a transient error -- so the code
-is verified correct against the schema, but has never actually been
-exercised against the live endpoint. That's the next milestone, from a
-machine with normal internet access.
+lookback limits, retry transient failures with backoff, and fail with a
+clear, diagnosable error rather than silently truncated data --
+initially verified only offline (`tests/test_yahoo_provider.py` against a
+mocked response), since `query1/query2.finance.yahoo.com` are blocked at
+the network-policy level in this dev sandbox (`CONNECT tunnel failed,
+response 403`).
+
+**It has since been run for real**, from Google Colab (the workaround for
+a user whose own machine couldn't get a working Python install --
+Colab has real internet and needs no local setup). That run's actual
+output was a live 422 Unprocessable Entity from Yahoo for a 728-day
+60-minute-bar request -- meaning the "~730 days" lookback limit this
+provider had assumed (a commonly cited figure) is wrong, or Yahoo has
+tightened it since. Worse: the original code treated 400/422 as a
+transient failure and retried the *identical* rejected request four
+times, which cannot succeed and just wastes time.
+
+Fixed: `_fetch_chunk` no longer retries a 400/422 -- `get_ohlc` catches it
+and bisects the requested range in half, recursively, retrying each half,
+so the provider self-corrects to whatever Yahoo's real current limit is
+instead of relying on a hard-coded guess that can silently go stale
+again. `tests/test_yahoo_provider.py` gained two tests for this exact
+scenario: bisection recovering into a complete series, and a
+range that's rejected at every size terminating in a clear `ValueError`
+(bounded by `_MAX_BISECTION_DEPTH`) rather than retrying forever.
+
+This is the project's first genuinely live-verified fix -- not just
+offline-tested against an assumed schema, but caught from a real failure
+against the real endpoint, exactly the gap `docs/LIMITATIONS.md` flagged
+before this. Still not exercised live: true multi-year chunking end-to-end,
+and daily-bar (`1d`) requests.
 
 ## MT5/Exness adapter: hardened and offline-tested, not live-tested
 
@@ -161,11 +179,17 @@ page body, not just a 200 status code.
 
 ## What has NOT been verified
 
-- Real market data live end-to-end (Yahoo or MT5/Exness) -- blocked in
-  this development sandbox by network policy (see `PROJECT_PLAN.md`
-  section 1; both are now hardened and unit-tested offline, see above).
-  This is the next thing to run, from an environment with normal internet
-  access, before drawing any conclusion about real edge.
+- **Whether any strategy has a real edge on real data.** Yahoo fetching
+  itself is now live-verified (see above), but that verification run
+  didn't get as far as reading `walk-forward`'s actual verdict output --
+  that's the next thing to actually look at.
+- Full backtest/walk-forward runs across the whole default pair universe
+  (9 pairs) and longer date ranges against the live Yahoo endpoint --
+  verified so far for a couple of pairs at H1/H4 over roughly a 2-year
+  span from Colab.
+- MT5/Exness live end-to-end -- still blocked in this development sandbox
+  (no Windows available at all, not just a network policy issue; hardened
+  and unit-tested offline, see above and `docs/EXNESS_INTEGRATION.md`).
 - Real Telegram delivery (formatting was verified; `TelegramNotifier.send()`
   needs a real bot token to test the actual HTTP call).
 - Continuous 24/7 operation (needs a real deployment target per
