@@ -13,6 +13,27 @@ it is **not** Exness's actual historical bid/ask. Once the MT5 adapter is
 connected (`docs/EXNESS_INTEGRATION.md`), real spread should replace this
 for any backtest whose absolute numbers you intend to act on.
 
+## Yahoo integration is hardened but unverified against the live endpoint
+
+`YahooFinanceProvider` (`fx_engine/data/providers.py`) now handles the
+things that would otherwise bite you the first time you actually used it:
+Yahoo's undocumented per-interval lookback limits (~60 days for 15m bars,
+~730 days for 60m bars) are respected by automatically splitting a
+multi-year H1/H4 request into sub-limit chunks and concatenating them,
+transient failures (connection errors, 429s, 5xx) retry with backoff, and
+a persistent failure raises a clear `ConnectionError` that explicitly
+names "network policy" as a possible cause rather than looking like a
+code bug. All of this was verified with `tests/test_yahoo_provider.py`
+against a realistic **mocked** Yahoo chart-API response, matching the
+real documented JSON schema -- because this sandbox's outbound access to
+`query1.finance.yahoo.com` is blocked at the network-policy level
+(confirmed: `CONNECT tunnel failed, response 403`, not a timeout or a
+transient error), the actual live endpoint has never been hit from here.
+Run `python -m fx_engine.main backtest --provider yahoo ...` from a
+machine with normal internet access to complete that verification --
+if Yahoo has changed their response schema since this was written, that
+run is where you'd find out.
+
 ## Synthetic data has no real market structure
 
 `fx_engine/data/providers.py: SyntheticDataProvider` produces a seeded,

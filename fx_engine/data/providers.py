@@ -24,8 +24,9 @@ Three implementations:
 from __future__ import annotations
 
 import hashlib
+import time
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -144,43 +145,96 @@ class YahooFinanceProvider(HistoricalDataProvider):
     """Real historical OHLC from Yahoo Finance's public chart endpoint.
 
     NOTE: requires normal outbound internet access to
-    query1.finance.yahoo.com. This will fail with a clear error (not
-    fabricated data) in network-restricted environments -- run it from
-    your own machine/VPS.
+    query1.finance.yahoo.com. This will fail with a clear ConnectionError
+    (never fabricated data) in network-restricted environments -- this
+    codebase's own dev sandbox included, see docs/LIMITATIONS.md -- run it
+    from a machine/VPS with normal internet access.
+
+    Yahoo enforces an (undocumented, but consistently observed) maximum
+    lookback window per intraday interval: ~60 days for 15-minute bars,
+    ~730 days for 60-minute bars. Daily bars have no such practical limit
+    for the ranges this project uses. A multi-year H4/H1 backtest request
+    is therefore automatically split into sub-730-day chunks and
+    concatenated -- without this, a 2+ year H4 backtest would silently
+    come back truncated instead of raising, which is worse than slow.
     """
 
     name = "yahoo"
     _INTERVAL = {Timeframe.M15: "15m", Timeframe.H1: "60m", Timeframe.H4: "60m", Timeframe.D1: "1d"}
+    _MAX_LOOKBACK_DAYS = {"15m": 58, "60m": 728, "1d": 36500}
+    _RETRY_ATTEMPTS = 4
+    _RETRY_BACKOFF_SECONDS = 2.0
 
     def _symbol(self, pair: str) -> str:
         return f"{pair}=X"
 
-    def get_ohlc(self, pair: str, timeframe: Timeframe, start: datetime, end: datetime) -> pd.DataFrame:
+    def _fetch_chunk(self, symbol: str, interval: str, start: datetime, end: datetime) -> pd.DataFrame:
         import requests
 
-        interval = self._INTERVAL[timeframe]
-        symbol = self._symbol(pair)
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        params = {
-            "interval": interval,
-            "period1": int(start.replace(tzinfo=timezone.utc).timestamp()),
-            "period2": int(end.replace(tzinfo=timezone.utc).timestamp()),
-        }
-        resp = requests.get(url, params=params, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        payload = resp.json()
+        params = {"interval": interval, "period1": int(start.timestamp()), "period2": int(end.timestamp())}
+
+        payload = None
+        for attempt in range(1, self._RETRY_ATTEMPTS + 1):
+            try:
+                resp = requests.get(url, params=params, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+                resp.raise_for_status()  # 429/5xx -> HTTPError, retried below like any other transient failure
+                payload = resp.json()
+                break
+            except requests.exceptions.RequestException as exc:
+                if attempt == self._RETRY_ATTEMPTS:
+                    raise ConnectionError(
+                        f"Could not reach Yahoo Finance for {symbol} after {self._RETRY_ATTEMPTS} attempts "
+                        f"({exc}). If you're running this from a sandboxed/restricted network (this "
+                        "project's own dev environment included), outbound access to "
+                        "query1.finance.yahoo.com may be blocked at the network policy level, not by "
+                        "anything wrong with this code -- run it from a machine with normal internet "
+                        "access instead. See docs/LIMITATIONS.md."
+                    ) from exc
+                time.sleep(self._RETRY_BACKOFF_SECONDS * attempt)
+
         result = payload.get("chart", {}).get("result")
         if not result:
-            raise ValueError(f"No data returned for {symbol}: {payload.get('chart', {}).get('error')}")
+            err = payload.get("chart", {}).get("error")
+            raise ValueError(f"No data returned for {symbol} ({start.date()}..{end.date()}): {err}")
         r = result[0]
-        ts = r["timestamp"]
+        ts = r.get("timestamp")
+        if not ts:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
         q = r["indicators"]["quote"][0]
         df = pd.DataFrame({
             "open": q["open"], "high": q["high"], "low": q["low"],
             "close": q["close"], "volume": q.get("volume", [0] * len(ts)),
         }, index=pd.to_datetime(ts, unit="s", utc=True))
         df.index.name = "time"
-        df = df.dropna(how="any")
+        return df.dropna(how="any")
+
+    def get_ohlc(self, pair: str, timeframe: Timeframe, start: datetime, end: datetime) -> pd.DataFrame:
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        if start >= end:
+            raise ValueError(f"start ({start}) must be before end ({end})")
+
+        interval = self._INTERVAL[timeframe]
+        symbol = self._symbol(pair)
+        max_days = self._MAX_LOOKBACK_DAYS[interval]
+
+        chunks: list[pd.DataFrame] = []
+        chunk_start = start
+        while chunk_start < end:
+            chunk_end = min(end, chunk_start + timedelta(days=max_days))
+            chunks.append(self._fetch_chunk(symbol, interval, chunk_start, chunk_end))
+            chunk_start = chunk_end
+            if chunk_start < end:
+                time.sleep(0.4)  # polite pacing across multiple requests to an unofficial endpoint
+
+        df = pd.concat(chunks) if chunks else pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        df = df[~df.index.duplicated(keep="first")].sort_index()
+        if df.empty:
+            raise ValueError(f"Yahoo returned no usable rows for {symbol} {timeframe.value} "
+                              f"{start.date()}..{end.date()} -- check the symbol and date range")
 
         if timeframe == Timeframe.H4:
             from fx_engine.data.models import resample_ohlc

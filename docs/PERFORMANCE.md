@@ -50,12 +50,30 @@ completed in well under a minute.
 - Signals persisted correctly to SQLite (`signals` table) with a real UUID,
   retrievable via `Database`.
 
+## Yahoo integration: hardened and offline-tested, not yet live-tested
+
+`YahooFinanceProvider` was rewritten to handle Yahoo's per-interval
+lookback limits (auto-chunking multi-year H1/H4 requests), retry
+transient failures with backoff, and fail with a clear, diagnosable error
+rather than silently truncated data. `tests/test_yahoo_provider.py`
+verifies all of this -- parsing, chunking into the correct number of
+requests, concatenation without duplicates/gaps, retry-then-recover, and
+the final-failure error message -- against a mocked response built to the
+real documented Yahoo chart-API schema. Confirmed during this same
+session: `query1.finance.yahoo.com` and `query2.finance.yahoo.com` both
+return `CONNECT tunnel failed, response 403` from this sandbox --  an
+organization network-policy denial, not a transient error -- so the code
+is verified correct against the schema, but has never actually been
+exercised against the live endpoint. That's the next milestone, from a
+machine with normal internet access.
+
 ## What has NOT been verified
 
-- Real market data (Yahoo or MT5/Exness) -- blocked in this development
-  sandbox by network policy (see `PROJECT_PLAN.md` section 1). This is
-  the next thing to run, from an environment with normal internet access,
-  before drawing any conclusion about real edge.
+- Real market data live end-to-end (Yahoo or MT5/Exness) -- blocked in
+  this development sandbox by network policy (see `PROJECT_PLAN.md`
+  section 1; Yahoo specifically is now unit-tested offline, see above).
+  This is the next thing to run, from an environment with normal internet
+  access, before drawing any conclusion about real edge.
 - Real Telegram delivery (formatting was verified; `TelegramNotifier.send()`
   needs a real bot token to test the actual HTTP call).
 - The MT5/Exness adapter (needs Windows/Wine + a running terminal, neither
