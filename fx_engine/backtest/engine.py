@@ -26,6 +26,7 @@ from fx_engine.costs import SpreadModel, fill_price
 from fx_engine.features import compute_feature_frame
 from fx_engine.regime import compute_regime_series
 from fx_engine.strategies.base import BaseStrategy, Direction
+from fx_engine.swap import swap_pips
 
 
 @dataclass
@@ -43,16 +44,26 @@ class Trade:
     regime_at_entry: str = ""
     spread_pips_at_entry: float = 0.0
     risk_distance: float = 0.0
+    pip: float = 0.0001
 
     @property
     def is_closed(self) -> bool:
         return self.exit_price is not None
 
+    def swap_price(self) -> float:
+        """Swap cost/credit (see fx_engine.swap), converted from pips into
+        the same price units as entry_price/exit_price so it folds directly
+        into pnl_price() -- zero by default (see config.SWAP_*_PIPS_PER_NIGHT)."""
+        if not self.is_closed:
+            return 0.0
+        pips = swap_pips(self.pair, self.direction, self.entry_time.to_pydatetime(), self.exit_time.to_pydatetime())
+        return pips * self.pip
+
     def pnl_price(self) -> float:
         if not self.is_closed:
             return 0.0
         sign = 1 if self.direction == "BUY" else -1
-        return sign * (self.exit_price - self.entry_price)
+        return sign * (self.exit_price - self.entry_price) + self.swap_price()
 
     def pnl_r(self) -> float:
         if not self.is_closed or self.risk_distance <= 0:
@@ -125,7 +136,7 @@ class BacktestEngine:
                         entry_time=next_ts, entry_price=entry_price, stop_loss=sl, take_profit=tp,
                         regime_at_entry=current_regime,
                         spread_pips_at_entry=quote.spread / spread_model.pip,
-                        risk_distance=risk_distance,
+                        risk_distance=risk_distance, pip=spread_model.pip,
                     )
                     holding_bars = 0
                 continue

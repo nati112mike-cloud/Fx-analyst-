@@ -32,11 +32,14 @@ few things that needed correcting before implementation:
    internet access.
 4. **Scope was built as a vertical slice first**, not 16 phases breadth-
    first: one full pipeline (data -> indicators -> regime -> 7 strategies
-   -> ensemble -> spread/cost gate -> quality score -> DB -> Telegram)
-   proven end-to-end before anything else, rather than shallow stubs of
-   everything. The dashboard (plan section 22) and live economic-calendar
-   feed (section 15) are the two pieces deliberately left as a documented
-   gap rather than a half-built stub -- see `docs/LIMITATIONS.md`.
+   -> ensemble -> spread/cost gate -> quality score -> position size -> DB
+   -> Telegram) proven end-to-end before anything else, rather than
+   shallow stubs of everything. That slice has since grown to cover
+   position sizing, an auto-enforced daily loss breaker, swap/rollover
+   cost modeling, and a local dashboard as well (see section 2 below and
+   `docs/PERFORMANCE.md` for how each was verified). A live economic-
+   calendar feed (plan section 15) remains the one deliberately-left gap
+   rather than a half-built stub -- see `docs/LIMITATIONS.md`.
 
 ## 2. Architecture
 
@@ -51,6 +54,10 @@ fx_engine/
                            (this is what keeps backtests O(n), not O(n^2))
   regime.py               8-state market regime classifier + strategy gating
   costs.py                 bid/ask spread modeling, ask/bid fill rules
+  swap.py                   rollover cost mechanism (pips/lot/night, triple
+                             Wednesday), rates default to zero -- see limitations
+  position_sizing.py         lots/risk/margin from equity+risk%+stop, correct
+                             pip-value math for direct/inverse/cross pairs
   strategies/
     base.py                 StrategySpec / StrategyResult / BaseStrategy
     trend_pullback.py, momentum.py, breakout.py, mean_reversion.py,
@@ -63,16 +70,22 @@ fx_engine/
                              historical expectancy (never arbitrary preference)
   scoring.py                  0-100 signal quality score (NOT a probability)
   db.py                        SQLite: strategy_versions, backtests, signals,
-                               signal_outcomes, paper_trades, system_health
+                               signal_outcomes, paper_trades, system_health;
+                               also daily realized-P&L / loss-breaker queries
+                               and the read models the dashboard uses
   broker/
     base.py                    BrokerAdapter interface (signal-only by default)
-    paper.py                    simulated fills for paper trading
+    paper.py                    simulated fills + running balance for paper trading
     exness_mt5.py                real Exness access via MT5 terminal
   news.py                        economic-calendar risk filter (see limitations)
-  telegram_bot.py                  signal formatting + sending
-  signal_engine.py                  orchestrates one full evaluation cycle
-  paper_trading.py                   continuous loop: signals -> paper fills
-  main.py                             CLI: backtest / walk-forward / signal-once / paper
+  telegram_bot.py                  signal formatting + sending, incl. position size
+  signal_engine.py                  orchestrates one full evaluation cycle,
+                                    including the daily-loss-breaker gate
+  paper_trading.py                   continuous loop: signals -> paper fills ->
+                                     swap-aware $ P&L -> broker balance update
+  dashboard.py + templates/            local read-only Flask dashboard (Section 22)
+  main.py                             CLI: backtest / walk-forward / signal-once /
+                                      paper / dashboard
 ```
 
 ## 3. Technology stack
@@ -86,8 +99,9 @@ fx_engine/
 - **requests** for the Telegram Bot API (no heavier Telegram SDK needed).
 - **MetaTrader5** (official package, Windows/Wine only) for the real
   Exness data/broker adapter.
-- No web framework / dashboard dependency yet -- deliberately deferred,
-  see `docs/LIMITATIONS.md`.
+- **Flask**, server-rendered Jinja templates, no build step or JS
+  framework, for the local dashboard (`fx_engine/dashboard.py`) -- no CDN
+  assets either, everything renders from inline CSS and the local DB.
 
 ## 4. Data sources
 
@@ -119,11 +133,14 @@ and returns a structured `StrategyResult`, never a bare buy/sell.
 ## 7. Database schema
 
 See `fx_engine/db.py` `SCHEMA`. Tables: `strategy_versions`, `backtests`,
-`signals`, `signal_outcomes`, `paper_trades`, `system_health`. Scoped down
-from the original plan's full multi-user schema (Users, per-strategy
-version-controlled history as separate rows, SpreadHistory, MarketRegimes,
-NewsEvents as persisted tables) to what a single personal user actually
-needs; strategy specs and backtests remain append-only/versioned.
+`signals`, `signal_outcomes`, `paper_trades` (now carrying real `lots` /
+`risk_amount` / `pnl_amount` in account-currency terms, not just
+R-multiples), `system_health`. Scoped down from the original plan's full
+multi-user schema (Users, per-strategy version-controlled history as
+separate rows, SpreadHistory, MarketRegimes, NewsEvents as persisted
+tables) to what a single personal user actually needs; strategy specs and
+backtests remain append-only/versioned. The dashboard (`fx_engine/dashboard.py`)
+reads this database directly and writes nothing to it.
 
 ## 8. Backtesting design
 
@@ -146,12 +163,15 @@ at face value, not argued with.
 
 ## 10. Signal generation design
 
-`signal_engine.py`: regime classification -> all 7 strategies vote ->
-`StrategyEnsemble` combines votes weighted by each strategy's latest
-validated backtest expectancy (equal weight + an explicit "UNVALIDATED"
-flag until a backtest exists) -> spread-vs-stop and risk/reward-after-
-costs gates (section 7 of the original brief) -> 0-100 quality score ->
-NO TRADE unless every gate clears. Section 26's principle is load-bearing
+`signal_engine.py`: daily-loss-breaker check (section 26 -- the very
+first gate, before any strategy even runs) -> regime classification ->
+all 7 strategies vote -> `StrategyEnsemble` combines votes weighted by
+each strategy's latest validated backtest expectancy (equal weight + an
+explicit "UNVALIDATED" flag until a backtest exists) -> spread-vs-stop
+and risk/reward-after-costs gates (section 7 of the original brief) ->
+0-100 quality score -> position size (`fx_engine/position_sizing.py`,
+using the connected broker's real equity or a configured fallback) -> NO
+TRADE unless every gate clears. Section 26's principle is load-bearing
 here, not decorative: most evaluations should end in NO TRADE.
 
 ## 11. Telegram architecture
@@ -182,19 +202,25 @@ local `.env` that is git-ignored. See `docs/SECURITY.md`.
 The pipeline was validated end-to-end against synthetic data during
 development (see commit history / `docs/PERFORMANCE.md`): indicators,
 regime detection, all 7 strategies, the backtest engine, walk-forward
-validation, the ensemble, the signal scorer, SQLite persistence, and
-Telegram message formatting were all exercised together and produced real,
-varying, non-fabricated numbers. This is evidence the *pipeline* is
-correct -- it is explicitly NOT evidence that any strategy has a real
-edge, since synthetic data has no real market structure to have an edge
-against. Real validation starts once real data (`yahoo` or `mt5`) is
-plugged in on a machine with normal internet access.
+validation, the ensemble, the signal scorer, position sizing (direct,
+inverse, and cross-pair pip-value math checked against hand
+calculations), the daily loss circuit breaker, swap/rollover cost
+(rollover-crossing counts checked against hand-calculated dates,
+including the triple-Wednesday case), SQLite persistence, Telegram
+message formatting, and the local dashboard (every route, plus actual
+rendered screenshots in light and dark mode via a headless browser) were
+all exercised together and produced real, varying, non-fabricated
+numbers -- 73 automated tests, all passing. This is evidence the
+*pipeline* is correct -- it is explicitly NOT evidence that any strategy
+has a real edge, since synthetic data has no real market structure to
+have an edge against. Real validation starts once real data (`yahoo` or
+`mt5`) is plugged in on a machine with normal internet access.
 
 ## 15. Risks and limitations
 
 See `docs/LIMITATIONS.md` for the full, honest list: synthetic-data-only
 validation so far, approximated (not real historical) spread, no live
-economic calendar connected, no dashboard yet, single position per
-pair/strategy in the backtester (no portfolio-level concurrent sizing),
-and the hard MT5/Windows dependency for anything touching real Exness
-data or execution.
+economic calendar connected, swap rates and margin simulation still need
+real account figures filled in, no correlated-exposure cap across
+concurrent paper positions, and the hard MT5/Windows dependency for
+anything touching real Exness data or execution.

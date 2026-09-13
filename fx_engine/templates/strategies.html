@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Strategies - FX Signal Engine{% endblock %}
+{% block content %}
+<h1>Strategy Performance</h1>
+<p class="lede">Latest saved backtest per (strategy, pair). Run <code>python -m fx_engine.main backtest --save</code> or
+<code>walk-forward --save</code> to populate this. Numbers are only as trustworthy as the data provider used to
+generate them -- check "provider" before drawing conclusions (see docs/LIMITATIONS.md on synthetic vs. real data).</p>
+<div class="card">
+  <div class="overflow">
+  <table>
+    <tr>
+      <th>Strategy</th><th>Pair</th><th>Timeframe</th><th>Provider</th><th>Trades</th><th>Win Rate</th>
+      <th>Expectancy (R)</th><th>Profit Factor</th><th>Max DD (R)</th><th>Walk-Forward</th><th>Saved (UTC)</th>
+    </tr>
+    {% for b in backtests %}
+    <tr>
+      <td>{{ b.strategy }}</td>
+      <td>{{ b.pair }}</td>
+      <td>{{ b.timeframe }}</td>
+      <td class="muted">{{ b.data_provider or "-" }}</td>
+      <td>{{ b.metrics.total_trades if b.metrics.total_trades is defined else "-" }}</td>
+      <td>{{ "%.0f%%"|format(b.metrics.win_rate * 100) if b.metrics.win_rate is defined else "-" }}</td>
+      <td>{{ "%.3f"|format(b.metrics.expectancy_r) if b.metrics.expectancy_r is defined else "-" }}</td>
+      <td>{{ "%.2f"|format(b.metrics.profit_factor) if b.metrics.profit_factor is defined else "-" }}</td>
+      <td>{{ "%.2f"|format(b.metrics.max_drawdown_r) if b.metrics.max_drawdown_r is defined else "-" }}</td>
+      <td>
+        {% if b.walk_forward_verdict %}
+        <span class="badge badge-{{ b.walk_forward_verdict|lower }}">{{ b.walk_forward_verdict }}</span>
+        {% else %}
+        <span class="badge badge-none">not run</span>
+        {% endif %}
+      </td>
+      <td class="muted">{{ b.created_at[:19] }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="11" class="muted">No backtests saved yet.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+</div>
+{% endblock %}

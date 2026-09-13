@@ -55,47 +55,73 @@ fabricating one. Every signal's news-risk component is neutral until you
 either load a CSV export from a real calendar source yourself
 (`NewsFilter.load_from_csv`) or extend this module with a real feed.
 
-## No dashboard
+## Dashboard exists, but is read-only and local
 
-Section 22 of the original brief asked for a web dashboard. This build
-prioritized proving the core pipeline (data -> strategies -> backtest ->
-ensemble -> signal -> Telegram) end-to-end first, per the "vertical slice
-before breadth" plan in `PROJECT_PLAN.md`. Today, `system_health`,
-`signals`, `backtests`, and `paper_trades` SQLite tables plus direct SQL
-queries or the CLI are the inspection surface. A dashboard is a
-reasonable next addition once the underlying signals have a track record
-worth visualizing.
+`fx_engine/dashboard.py` (`python -m fx_engine.main dashboard`) covers
+Section 22: overview, signals, strategy performance, paper trades with an
+equity curve, and system health, all rendered from the local SQLite DB
+with zero external network calls (no CDN assets either -- verified by
+actually running the Flask server and screenshotting every page, in both
+light and dark mode, in this sandbox; see `docs/PERFORMANCE.md`). It does
+not write to the database, does not talk to a broker, and binds to
+127.0.0.1 by default -- see `docs/SECURITY.md` before exposing it wider.
+There's no auth layer; don't put this on a public interface as-is.
 
-## Single position per (pair, strategy) in the backtester
+## Backtester is single-strategy; the paper-trading loop is the portfolio view
 
-`BacktestEngine` does not model concurrent open positions across
-strategies or portfolio-level position sizing -- each strategy's backtest
-on a given pair opens and fully closes one trade at a time. Realistic for
-evaluating one strategy in isolation; not yet a full portfolio simulator.
+`BacktestEngine` deliberately opens one trade at a time for a single
+(pair, strategy) combination -- that's the right scope for asking "does
+this strategy have an edge," which is what backtesting is for, and
+mixing in other strategies/pairs would muddy that question. Portfolio-
+level behavior -- multiple concurrent positions across different pairs
+and strategies, sharing one account balance -- already exists one layer
+up, in `paper_trading.PaperTradingLoop`: `Database.open_paper_trades()`
+naturally holds many simultaneous rows, and a shared `PaperBrokerAdapter`
+balance is updated as each one closes (see `docs/RISK_MANAGEMENT.md`).
+What's still missing at the portfolio layer: correlated-exposure limits
+(e.g. capping total risk across multiple JPY pairs open at once) --
+nothing currently prevents every pair from independently risking its own
+`RISK_PER_TRADE_PCT` at the same time, which compounds if several are
+correlated.
 
-## No swap/rollover cost modeling
+## Swap/rollover cost modeling exists, real rates still need to be filled in
 
-`config.SWAP_PER_LOT_PER_DAY` exists as a knob but defaults to 0 and
-isn't yet subtracted anywhere in the backtest engine. For any strategy
-that holds positions overnight (most of these close same-session, per
-each strategy's `max_holding_bars`, but not strictly guaranteed), real
-swap costs should be added to the P&L calculation before trusting
-multi-day expectancy numbers.
+`fx_engine/swap.py` implements the actual mechanism (pips per lot per
+night, applied at the 21:00 UTC rollover, tripled on Wednesday for the
+weekend) and it's wired into both `BacktestEngine.Trade.pnl_price()` and
+`paper_trading.py`'s trade resolution -- verified with hand-calculated
+rollover-crossing counts in `tests/test_swap.py`. The rates themselves
+(`config.SWAP_LONG_PIPS_PER_NIGHT` / `SWAP_SHORT_PIPS_PER_NIGHT`) are all
+zero by default, because there is no honest non-zero default -- swap
+rates are broker- and account-type specific and move with interest rates.
+Fill in your own account's real figures (MT5 terminal -> Market Watch ->
+right-click a symbol -> Specification) before trusting multi-day expectancy
+numbers for strategies that hold positions overnight. Also unverified:
+the exact rollover hour and triple-swap weekday convention against a real
+Exness account (21:00 UTC / Wednesday is the common industry default used
+here, not a confirmed Exness-specific figure).
 
-## No margin/leverage simulation
+## Margin/leverage: computed at signal time, not simulated over an equity path
 
-Metrics are computed in R-multiples (risk-normalized), which sidesteps
-needing an account-equity simulation for backtesting logic, but that also
-means max drawdown in R-terms is not the same thing as margin-call risk
-at real leverage. Position-sizing decisions still need your own separate
-leverage/margin math against your actual account.
+`fx_engine/position_sizing.py` computes required margin for a given trade
+correctly (notional / leverage) and it's shown in every signal, but there
+is still no running margin-call simulation across a backtest's full
+equity path -- max drawdown in R-multiples is not the same thing as
+margin-call risk at real leverage over time. Size conservatively and
+watch your real account's margin level directly until this exists.
 
-## Daily loss circuit breaker not yet auto-enforced
+## Daily loss circuit breaker: auto-enforced in paper trading, needs real data to mean much
 
-`config.MAX_DAILY_LOSS_PCT` is defined and documented
-(`docs/RISK_MANAGEMENT.md`) but `paper_trading.py` doesn't yet aggregate
-same-day P&L to automatically pause new signals once the cap is hit --
-apply it manually until that's wired up.
+`config.MAX_DAILY_LOSS_PCT` is now actually enforced:
+`Database.daily_loss_limit_breached()` sums today's realized dollar P&L
+(each paper trade's `pnl_amount`, computed from its real `risk_amount` via
+`fx_engine/position_sizing.py`) and `SignalEngine.evaluate_pair()` returns
+NO TRADE for the rest of the UTC day once it's breached -- verified in
+`tests/test_daily_loss_and_paper.py`, including that it only triggers on
+realized losses (not unrealized drawdown) and resets at the UTC day
+boundary. Like everything else running on `synthetic`/unverified-`yahoo`
+data, the breaker's real value only shows up once it's protecting an
+account whose numbers come from genuine backtested/live performance.
 
 ## MT5/Exness adapter is hardened and offline-tested, not live-verified
 

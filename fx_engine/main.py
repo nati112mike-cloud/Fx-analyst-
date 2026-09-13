@@ -5,6 +5,7 @@
     python -m fx_engine.main walk-forward --pair EURUSD --strategy trend_pullback
     python -m fx_engine.main signal-once --pair EURUSD
     python -m fx_engine.main paper --pairs EURUSD,GBPUSD --interval 900
+    python -m fx_engine.main dashboard --port 8080
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 from fx_engine import config
 from fx_engine.backtest.engine import BacktestEngine
+from fx_engine.broker.paper import PaperBrokerAdapter
 from fx_engine.backtest.metrics import compute_metrics
 from fx_engine.backtest.walk_forward import run_walk_forward
 from fx_engine.data.models import Timeframe
@@ -111,10 +113,12 @@ def cmd_paper(args) -> None:
     news_filter = NewsFilter()
     if args.news_csv:
         news_filter.load_from_csv(args.news_csv)
-    engine = SignalEngine(provider, db=db, notifier=notifier, news_filter=news_filter, min_signal_score=args.min_score)
+    paper_broker = PaperBrokerAdapter(provider, starting_balance=config.ACCOUNT_STARTING_BALANCE)
+    engine = SignalEngine(provider, db=db, notifier=notifier, news_filter=news_filter,
+                           min_signal_score=args.min_score, broker=paper_broker)
     pairs = args.pairs.split(",") if args.pairs else config.PAIRS
     loop = PaperTradingLoop(engine, provider, pairs=pairs, timeframe=Timeframe(args.timeframe),
-                             poll_interval_seconds=args.interval)
+                             poll_interval_seconds=args.interval, broker=paper_broker)
     if args.once:
         outcomes = loop.run_once()
         for o in outcomes:
@@ -123,8 +127,20 @@ def cmd_paper(args) -> None:
             else:
                 _, msg = o
                 print(msg.format())
+        print(f"\nPaper account balance: {paper_broker.balance:.2f} {config.ACCOUNT_CURRENCY} "
+              f"(started at {config.ACCOUNT_STARTING_BALANCE:.2f})")
     else:
         loop.run_forever()
+
+
+def cmd_dashboard(args) -> None:
+    from fx_engine.dashboard import create_app
+
+    db = Database()
+    db.init_schema()
+    app = create_app(db)
+    print(f"Dashboard running at http://{args.host}:{args.port} (Ctrl+C to stop)")
+    app.run(host=args.host, port=args.port, debug=False)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -169,6 +185,11 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("--news-csv", default="")
     common_data_args(pt)
     pt.set_defaults(func=cmd_paper)
+
+    dash = sub.add_parser("dashboard", help="Run the local read-only dashboard over the database")
+    dash.add_argument("--host", default="127.0.0.1")
+    dash.add_argument("--port", type=int, default=8080)
+    dash.set_defaults(func=cmd_dashboard)
 
     return p
 

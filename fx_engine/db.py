@@ -78,10 +78,13 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     entry_price REAL NOT NULL,
     stop_loss REAL NOT NULL,
     take_profit REAL NOT NULL,
+    lots REAL,                 -- position size at entry (fx_engine.position_sizing), if it could be computed
+    risk_amount REAL,          -- dollar amount risked at entry, lots * stop_distance * pip_value
     exit_time TEXT,
     exit_price REAL,
     exit_reason TEXT,
     pnl_r REAL,
+    pnl_amount REAL,           -- real dollar P&L = pnl_r * risk_amount (NULL if risk_amount unknown)
     created_at TEXT NOT NULL
 );
 
@@ -202,23 +205,113 @@ class Database:
             cur = conn.execute(
                 """INSERT INTO paper_trades
                    (signal_id, pair, direction, entry_time, entry_price, stop_loss, take_profit,
-                    created_at) VALUES (?,?,?,?,?,?,?,?)""",
+                    lots, risk_amount, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (row.get("signal_id"), row["pair"], row["direction"], row["entry_time"], row["entry_price"],
-                 row["stop_loss"], row["take_profit"], datetime.now(timezone.utc).isoformat()),
+                 row["stop_loss"], row["take_profit"], row.get("lots"), row.get("risk_amount"),
+                 datetime.now(timezone.utc).isoformat()),
             )
             return cur.lastrowid
 
-    def close_paper_trade(self, trade_id: int, exit_time: str, exit_price: float, exit_reason: str, pnl_r: float) -> None:
+    def close_paper_trade(self, trade_id: int, exit_time: str, exit_price: float, exit_reason: str,
+                           pnl_r: float, pnl_amount: float | None = None) -> None:
         with self._conn() as conn:
             conn.execute(
-                """UPDATE paper_trades SET exit_time=?, exit_price=?, exit_reason=?, pnl_r=?
+                """UPDATE paper_trades SET exit_time=?, exit_price=?, exit_reason=?, pnl_r=?, pnl_amount=?
                    WHERE id=?""",
-                (exit_time, exit_price, exit_reason, pnl_r, trade_id),
+                (exit_time, exit_price, exit_reason, pnl_r, pnl_amount, trade_id),
             )
 
     def open_paper_trades(self) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM paper_trades WHERE exit_time IS NULL").fetchall()
+        return [dict(r) for r in rows]
+
+    def realized_pnl_today(self, as_of: datetime | None = None) -> float:
+        """Sum of pnl_amount for paper trades closed on the same UTC
+        calendar day as `as_of` (default: now). Trades with no known
+        pnl_amount (position sizing failed at entry) don't count toward
+        this -- there's no honest dollar figure to sum for them."""
+        as_of = as_of or datetime.now(timezone.utc)
+        day = as_of.date().isoformat()
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT COALESCE(SUM(pnl_amount), 0.0) AS total FROM paper_trades
+                   WHERE exit_time IS NOT NULL AND pnl_amount IS NOT NULL AND date(exit_time) = ?""",
+                (day,),
+            ).fetchone()
+        return float(row["total"])
+
+    def daily_loss_limit_breached(self, current_equity: float, max_daily_loss_pct: float,
+                                   as_of: datetime | None = None) -> tuple[bool, float]:
+        """Returns (breached, realized_pnl_today). Breached only on
+        realized losses -- an unrealized open drawdown doesn't count,
+        since paper trades resolve on their own SL/TP, not on a
+        mark-to-market check."""
+        realized = self.realized_pnl_today(as_of)
+        if realized >= 0 or current_equity <= 0:
+            return False, realized
+        loss_limit = current_equity * (max_daily_loss_pct / 100.0)
+        return abs(realized) >= loss_limit, realized
+
+    def recent_signals(self, limit: int = 50) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT s.*, o.outcome, o.pnl_r AS outcome_pnl_r, o.exit_price AS outcome_exit_price
+                   FROM signals s LEFT JOIN signal_outcomes o ON o.signal_id = s.id
+                   ORDER BY s.created_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def latest_backtest_per_strategy_pair(self) -> list[dict]:
+        """One row per (strategy, pair): whichever backtest was saved most
+        recently for that combination, with metrics parsed out of JSON."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT b.* FROM backtests b
+                   INNER JOIN (
+                       SELECT strategy, pair, MAX(created_at) AS max_created
+                       FROM backtests GROUP BY strategy, pair
+                   ) latest ON b.strategy = latest.strategy AND b.pair = latest.pair
+                              AND b.created_at = latest.max_created
+                   ORDER BY b.strategy, b.pair"""
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["metrics"] = json.loads(d["metrics_json"]) if d.get("metrics_json") else {}
+            d["walk_forward"] = json.loads(d["walk_forward_json"]) if d.get("walk_forward_json") else None
+            out.append(d)
+        return out
+
+    def recent_paper_trades(self, limit: int = 100) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_trades ORDER BY created_at DESC LIMIT ?", (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def paper_equity_curve(self) -> list[dict]:
+        """Cumulative realized P&L over time from closed paper trades, in
+        chronological order -- the running equity curve the dashboard plots."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT exit_time, pnl_amount FROM paper_trades
+                   WHERE exit_time IS NOT NULL AND pnl_amount IS NOT NULL
+                   ORDER BY exit_time ASC"""
+            ).fetchall()
+        cumulative = 0.0
+        curve = []
+        for r in rows:
+            cumulative += r["pnl_amount"]
+            curve.append({"exit_time": r["exit_time"], "pnl_amount": r["pnl_amount"], "cumulative": cumulative})
+        return curve
+
+    def recent_health(self, limit: int = 50) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM system_health ORDER BY id DESC LIMIT ?", (limit,),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def log_health(self, component: str, status: str, message: str = "") -> None:

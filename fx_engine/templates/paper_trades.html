@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Paper Trades - FX Signal Engine{% endblock %}
+{% block content %}
+<h1>Paper Trades</h1>
+<p class="lede">Every simulated trade the paper-trading loop has opened, most recent first, plus the running
+realized-P&amp;L curve. This is what "proof the strategy works" looks like before it looks like real money -- see
+docs/LIMITATIONS.md on how long to run this before trusting it.</p>
+
+<div class="card">
+  <h2>Realized P&amp;L (cumulative)</h2>
+  {% if svg_points %}
+  <svg viewBox="0 0 640 160" width="100%" height="160" preserveAspectRatio="none">
+    <polyline points="{{ svg_points }}" fill="none" stroke="var(--accent)" stroke-width="2" />
+  </svg>
+  <p class="muted" style="font-size:12px;">range: {{ "%.2f"|format(curve_min) }} to {{ "%.2f"|format(curve_max) }}</p>
+  {% else %}
+  <p class="muted">Not enough closed trades yet for a curve (need at least 2).</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Trade Log</h2>
+  <div class="overflow">
+  <table>
+    <tr>
+      <th>Pair</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Lots</th><th>Risk</th>
+      <th>Reason</th><th>P&amp;L (R)</th><th>P&amp;L ($)</th><th>Opened (UTC)</th><th>Closed (UTC)</th>
+    </tr>
+    {% for t in trades %}
+    <tr>
+      <td>{{ t.pair }}</td>
+      <td class="{{ 'buy' if t.direction=='BUY' else 'sell' }}">{{ t.direction }}</td>
+      <td>{{ "%.5f"|format(t.entry_price) }}</td>
+      <td>{{ "%.5f"|format(t.exit_price) if t.exit_price is not none else "-" }}</td>
+      <td>{{ t.lots if t.lots is not none else "-" }}</td>
+      <td>{{ "%.2f"|format(t.risk_amount) if t.risk_amount is not none else "-" }}</td>
+      <td>{{ t.exit_reason or "OPEN" }}</td>
+      <td style="color:{{ 'var(--green)' if (t.pnl_r or 0) >= 0 else 'var(--red)' }}">
+        {{ "%.2f"|format(t.pnl_r) if t.pnl_r is not none else "-" }}
+      </td>
+      <td style="color:{{ 'var(--green)' if (t.pnl_amount or 0) >= 0 else 'var(--red)' }}">
+        {{ "%.2f"|format(t.pnl_amount) if t.pnl_amount is not none else "-" }}
+      </td>
+      <td class="muted">{{ t.entry_time[:19] }}</td>
+      <td class="muted">{{ t.exit_time[:19] if t.exit_time else "-" }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="11" class="muted">No paper trades yet -- run `python -m fx_engine.main paper --once`.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+</div>
+{% endblock %}

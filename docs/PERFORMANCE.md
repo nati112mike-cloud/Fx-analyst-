@@ -102,6 +102,63 @@ it does not prove the real MT5 terminal integration works end-to-end,
 which can only happen on a Windows machine with a live Exness account --
 the next milestone for this piece specifically.
 
+## Position sizing: verified against hand calculations
+
+`fx_engine/position_sizing.py`'s three pip-value cases (direct pairs like
+EURUSD, inverse pairs like USDJPY, and cross pairs like EURJPY needing a
+third conversion rate) were each checked against manually computed
+expected values in `tests/test_position_sizing.py` -- e.g. EURUSD pip
+value $10/lot exactly, USDJPY pip value `1000/149.50` exactly, and a
+$10,000-equity/0.5%-risk/30-pip-stop EURUSD trade sizing to exactly 0.16
+lots after rounding down to the 0.01 lot step (never up past the risk
+budget, checked across four different equity sizes). The cross-pair
+auto-resolution (fetching a USDJPY quote to price an EURJPY position) was
+exercised through the full `SignalEngine` and initially found -- and
+fixed -- a real bug: the lookup window was too short for
+`SyntheticDataProvider`'s own minimum bar count, which a live end-to-end
+run surfaced immediately (see `docs/PERFORMANCE.md` engineering-performance
+pattern above: a class of bug, not a one-off, since the exact same
+too-short-window issue also had to be fixed in `paper_trading.py`'s trade
+resolution once tested end-to-end).
+
+## Daily loss circuit breaker: verified including the UTC-day boundary
+
+`Database.daily_loss_limit_breached()` and `realized_pnl_today()` were
+tested for: summing only today's closed trades (not yesterday's, not
+still-open ones, not trades with an unknown dollar P&L), the exact-limit
+boundary (breached at precisely 2.00% of equity, not 1.99% or 2.01%), and
+that a profitable day never breaches regardless of trade count. A live
+`SignalEngine.evaluate_pair()` call was verified to actually return
+`NoTradeReason("... daily loss circuit breaker ...")` once a synthetic
+loss was recorded, proving the gate runs before any strategy computation
+(not just that the underlying query is correct).
+
+## Swap/rollover: rollover-crossing counts verified against hand-picked dates
+
+`fx_engine/swap.py`'s `count_rollover_charges()` was checked against
+manually counted crossings for specific calendar dates (2024-03-11 is a
+Monday, 2024-03-13 a Wednesday): zero charges for same-day-before-rollover,
+one charge for an ordinary overnight hold, and four charge-units
+(1 ordinary + 1 tripled) for a hold spanning a Wednesday rollover. The
+result was then verified to actually flow into `Trade.pnl_price()`'s
+final number, not just exist as an isolated calculation.
+
+## Dashboard: every route tested, then actually rendered and screenshotted
+
+Beyond `tests/test_dashboard.py` (all 5 pages return 200 with expected
+data present, and all 5 render without error on a brand-new empty
+database), the dashboard was run as a real Flask server in this sandbox
+and its pages were fetched with `curl` (200 on every route) and then
+rendered with a headless Chromium browser (already available in this
+environment) to produce actual screenshots -- checked visually for the
+overview stats, the signals/strategies tables including the color-coded
+walk-forward verdict badges, and the server-rendered SVG equity-curve
+sparkline, in both light and dark `prefers-color-scheme`. This caught one
+real bug before it shipped: the `reason` column was queried from the
+database correctly but never rendered in `signals.html`'s template --
+found because the test asserted for specific reason text in the rendered
+page body, not just a 200 status code.
+
 ## What has NOT been verified
 
 - Real market data live end-to-end (Yahoo or MT5/Exness) -- blocked in
@@ -113,3 +170,10 @@ the next milestone for this piece specifically.
   needs a real bot token to test the actual HTTP call).
 - Continuous 24/7 operation (needs a real deployment target per
   `docs/DEPLOYMENT.md`).
+- The rollover hour (21:00 UTC) and triple-swap weekday (Wednesday) used
+  by `fx_engine/swap.py` against a real Exness account's actual schedule
+  -- these are the common industry convention, not a confirmed
+  Exness-specific figure.
+- The dashboard under real concurrent usage / any load beyond a single
+  local user clicking around -- it's a small Flask dev-server setup by
+  design (personal, single-user, `127.0.0.1`), not load-tested.

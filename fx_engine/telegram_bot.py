@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from fx_engine import config
 from fx_engine.ensemble import EnsembleResult
+from fx_engine.position_sizing import PositionSizeResult
 from fx_engine.regime import RegimeSnapshot
 from fx_engine.scoring import SignalScore
 from fx_engine.strategies.base import Direction
@@ -36,6 +37,8 @@ class SignalMessage:
     spread_pips: float
     reason: str
     pip: float
+    position_size: PositionSizeResult | None = None
+    position_size_error: str | None = None
 
     def _fmt(self, price: float) -> str:
         digits = 3 if self.pip == 0.01 else 5
@@ -64,6 +67,15 @@ class SignalMessage:
         if self.risk_reward_2:
             rr_line += f" / 1:{self.risk_reward_2:.1f}"
         lines.append(rr_line)
+        if self.position_size is not None:
+            ps = self.position_size
+            margin_txt = f", ~{ps.required_margin:.0f} {ps.account_currency} margin" if ps.required_margin else ""
+            lines.append(f"POSITION SIZE: {ps.lots:.2f} lots (risking {ps.risk_amount:.2f} {ps.account_currency} "
+                          f"= {ps.risk_pct:.2f}% of {ps.account_equity:.0f}{margin_txt})")
+            for note in ps.notes:
+                lines.append(f"  ⚠️ {note}")
+        elif self.position_size_error:
+            lines.append(f"POSITION SIZE: unavailable ({self.position_size_error})")
         lines += [
             f"SPREAD: {self.spread_pips:.1f} pips",
             f"MARKET REGIME: {self.regime.regime.replace('_', ' ').title()}",

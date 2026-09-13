@@ -31,11 +31,15 @@ python -m fx_engine.main backtest --pair EURUSD --strategy all --provider synthe
 # Walk-forward / holdout validation for one strategy
 python -m fx_engine.main walk-forward --pair EURUSD --strategy price_action --provider synthetic --save
 
-# Evaluate one pair right now and print the signal (or NO TRADE + why)
+# Evaluate one pair right now and print the signal (or NO TRADE + why) --
+# includes an actual position size (lots, dollar risk, required margin)
 python -m fx_engine.main signal-once --pair EURUSD --provider synthetic
 
 # Run one paper-trading cycle across the default 9-pair universe
 python -m fx_engine.main paper --once --provider synthetic
+
+# Browse signals, strategy performance, paper trades and system health
+python -m fx_engine.main dashboard --port 8080
 ```
 
 None of the above needs a Telegram bot, an Exness account, or real
@@ -68,9 +72,10 @@ immediately. To use it for real:
 | `docs/ARCHITECTURE.md` | Module-by-module reference |
 | `docs/STRATEGIES.md` | Every strategy's full spec (auto-generated from code) |
 | `docs/BACKTESTING.md` | Spread/cost modeling, no-lookahead design |
-| `docs/RISK_MANAGEMENT.md` | Position sizing, daily loss limits |
+| `docs/RISK_MANAGEMENT.md` | Position sizing, daily loss limits, swap cost |
 | `docs/EXNESS_INTEGRATION.md` | The MT5 reality check, setup steps |
 | `docs/TELEGRAM.md` | Bot setup |
+| `docs/DASHBOARD.md` | The local read-only dashboard |
 | `docs/DEPLOYMENT.md` | Running this continuously |
 | `docs/SECURITY.md` | Credentials, signal-only-by-design |
 | `docs/LIMITATIONS.md` | The honest list of what's approximated or missing |

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}System Health - FX Signal Engine{% endblock %}
+{% block content %}
+<h1>System Health</h1>
+<p class="lede">One row per evaluation cycle / error, most recent first -- written by the paper-trading loop
+and the signal engine (see fx_engine/paper_trading.py). This plus your Telegram channel is the monitoring
+surface today; see docs/DEPLOYMENT.md.</p>
+<div class="card">
+  <div class="overflow">
+  <table>
+    <tr><th>Time (UTC)</th><th>Component</th><th>Status</th><th>Message</th></tr>
+    {% for h in health %}
+    <tr>
+      <td>{{ h.checked_at[:19] }}</td>
+      <td>{{ h.component }}</td>
+      <td class="{{ 'ok' if h.status=='OK' else ('warn' if h.status=='WARN' else 'error') }}">{{ h.status }}</td>
+      <td class="muted">{{ h.message }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">No health checks logged yet.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+</div>
+{% endblock %}

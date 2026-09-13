@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Signals - FX Signal Engine{% endblock %}
+{% block content %}
+<h1>Signals</h1>
+<p class="lede">Every signal ever generated, most recent first, including its eventual outcome once resolved.</p>
+<div class="card">
+  <div class="overflow">
+  <table>
+    <tr>
+      <th>Time (UTC)</th><th>Pair</th><th>Dir</th><th>Signal</th><th>Score</th><th>Entry</th>
+      <th>SL</th><th>TP1</th><th>Spread</th><th>Regime</th><th>Status</th><th>Outcome</th><th>Outcome R</th><th>Reason</th>
+    </tr>
+    {% for s in signals %}
+    <tr>
+      <td>{{ s.created_at[:19] }}</td>
+      <td>{{ s.pair }}</td>
+      <td class="{{ 'buy' if s.direction=='BUY' else 'sell' }}">{{ s.direction }}</td>
+      <td>{{ s.overall_signal }}</td>
+      <td>{{ "%.0f"|format(s.score) }}</td>
+      <td>{{ "%.5f-%.5f"|format(s.entry_low, s.entry_high) if s.entry_low is not none else "-" }}</td>
+      <td>{{ "%.5f"|format(s.stop_loss) if s.stop_loss is not none else "-" }}</td>
+      <td>{{ "%.5f"|format(s.take_profit_1) if s.take_profit_1 is not none else "-" }}</td>
+      <td>{{ "%.1f"|format(s.spread_pips) if s.spread_pips is not none else "-" }}</td>
+      <td class="muted">{{ s.regime or "-" }}</td>
+      <td>{{ s.status }}</td>
+      <td>{{ s.outcome or "-" }}</td>
+      <td>{{ "%.2f"|format(s.outcome_pnl_r) if s.outcome_pnl_r is not none else "-" }}</td>
+      <td class="muted">{{ s.reason }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="14" class="muted">No signals yet.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+</div>
+{% endblock %}

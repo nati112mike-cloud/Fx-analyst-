@@ -12,6 +12,9 @@ features.compute_feature_frame()  -- every indicator, computed ONCE
 regime.compute_regime_series()  -- 8-state classification per bar
         |
         v
+daily loss circuit breaker check (db.Database.daily_loss_limit_breached)
+        |
+        v
 for each of 7 strategies: strategy.generate(df, pair, regime, features)
         |
         v
@@ -25,11 +28,17 @@ costs.SpreadModel  -- reject if spread too wide relative to stop,
 scoring.compute_signal_score()  -- 0-100 quality score, reject if too low
         |
         v
+position_sizing.calculate_position_size()  -- lots/risk/margin from real
+                                              (or fallback) account equity
+        |
+        v
 db.Database.insert_signal()  +  telegram_bot.TelegramNotifier.send()
 ```
 
 Every arrow above can terminate in **NO TRADE** (`signal_engine.NoTradeReason`)
--- that is the expected, common outcome, not a failure mode.
+-- that is the expected, common outcome, not a failure mode. The daily
+loss check runs FIRST, before any strategy even evaluates, so a breached
+day is cheap to reject on every pair in the loop.
 
 ## Why `features.py` exists
 
@@ -84,3 +93,39 @@ See `scoring.WEIGHTS` for the exact breakdown (agreement, risk/reward,
 spread quality, regime confidence, historical expectancy, news risk).
 Every component is 0-1 and visible in `SignalScore.components` -- nothing
 about the final 0-100 number is opaque.
+
+## Position sizing and account equity
+
+`position_sizing.calculate_position_size()` is pure math: given entry,
+stop, equity, and risk%, it returns lots/dollar-risk/required-margin. The
+equity it's given comes from `SignalEngine.current_account()`, which
+prefers a connected `BrokerAdapter`'s real `get_account_info()` (e.g.
+`PaperBrokerAdapter`'s running balance) and falls back to
+`config.ACCOUNT_STARTING_BALANCE` when no broker is attached. Cross-pair
+pip values (e.g. EURJPY on a USD account) need a third conversion rate,
+resolved automatically via `SignalEngine._price_lookup()` fetching a
+recent quote for the needed pair (e.g. USDJPY).
+
+## Paper trading's money flow
+
+`paper_trading.PaperTradingLoop` is the only place dollar P&L becomes
+real (well, real-*ish* -- simulated): each closed trade's `pnl_amount` is
+`pnl_r * risk_amount` (both stored on the `paper_trades` row at entry)
+plus any swap cost/credit (`fx_engine/swap.py`, converted from pips to
+dollars via `position_sizing.pip_value_per_lot`), and that amount is
+added directly to the attached `PaperBrokerAdapter.balance`. That same
+balance is what `SignalEngine.current_account()` reads for the *next*
+trade's position sizing and what `Database.daily_loss_limit_breached()`
+compares today's realized losses against -- the loop is a closed, self-
+consistent simulation of one account, not a disconnected pile of
+independent trade records.
+
+## Dashboard
+
+`fx_engine/dashboard.py` is a thin, read-only Flask layer: every route
+calls a `Database` query method (several added specifically for this --
+`recent_signals`, `latest_backtest_per_strategy_pair`, `recent_paper_trades`,
+`paper_equity_curve`, `recent_health`) and renders a Jinja template from
+`fx_engine/templates/`. No route mutates state. The equity-curve chart on
+`/paper-trades` is a plain SVG `<polyline>` computed server-side in
+`_equity_curve_svg_points()` -- no JS charting library, no CDN dependency.

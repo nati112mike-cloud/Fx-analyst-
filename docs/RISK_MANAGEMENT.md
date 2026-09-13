@@ -2,26 +2,35 @@
 
 These are defaults in `fx_engine/config.py`, overridable via `.env`. None
 of this is enforced by an order-placement layer (there isn't one -- see
-`docs/SECURITY.md`); it governs what the *signal* recommends and what the
-paper-trading loop simulates.
+`docs/SECURITY.md`); it governs what the *signal* recommends, what the
+position size calculator computes, and what the paper-trading loop
+actually simulates and enforces.
 
-## Per-trade risk
+## Per-trade risk and position sizing
 
 `RISK_PER_TRADE_PCT` (default 0.5%): the fraction of account equity a
-single trade's stop-loss distance should represent. This engine does not
-compute lot size for you automatically (that requires knowing your actual
-account currency/equity/leverage, which only exists once a broker adapter
-with a real account is connected) -- treat the SL/TP levels in a signal
-as price levels, and size the position yourself so that (entry - stop) x
-position_size = RISK_PER_TRADE_PCT x account_equity.
+single trade's stop-loss distance should represent. `fx_engine/position_sizing.py`
+turns this into an actual lot size -- every signal includes a `POSITION SIZE`
+line (lots, dollar risk, required margin), computed correctly for direct
+pairs (EURUSD on a USD account), inverse pairs (USDJPY on a USD account),
+and cross pairs (EURJPY on a USD account, which needs a USDJPY conversion
+rate -- resolved automatically from a live quote). See
+`calculate_position_size()`'s docstring for the exact math, and
+`tests/test_position_sizing.py` for it verified against hand calculations.
+Equity comes from a connected broker's real account (`SignalEngine.current_account()`)
+when one is set, otherwise from `ACCOUNT_STARTING_BALANCE` -- see `.env.example`.
 
 ## Daily loss circuit breaker
 
-`MAX_DAILY_LOSS_PCT` (default 2.0%): stop taking new signals for the day
-once cumulative realized loss reaches this. Not yet automatically
-enforced inside `paper_trading.py` (it would need same-day P&L
-aggregation wired to a "pause" state) -- see `docs/LIMITATIONS.md`. Apply
-it manually until that's built.
+`MAX_DAILY_LOSS_PCT` (default 2.0%) is auto-enforced end to end:
+`Database.daily_loss_limit_breached()` sums today's realized dollar P&L
+across closed paper trades (`pnl_amount`, computed from each trade's real
+`risk_amount`) and `SignalEngine.evaluate_pair()` refuses to evaluate any
+new signal for the rest of the UTC day once the limit is hit -- verified
+in `tests/test_daily_loss_and_paper.py`. It only counts *realized* losses
+(a trade that's closed with a loss), not unrealized open drawdown, since
+paper trades resolve on their own SL/TP rather than a continuous
+mark-to-market check.
 
 ## Minimum risk/reward after costs
 
@@ -42,6 +51,14 @@ the reward target is far away.
 `MAX_HOLDING_BARS` (default 60): a trade idea that hasn't hit its stop or
 target after this many bars is closed at market. Prevents a stale signal
 from sitting open indefinitely on a pair that stopped moving.
+
+## Swap/rollover cost
+
+Positions held through the daily rollover accrue swap -- see
+`fx_engine/swap.py` and `docs/LIMITATIONS.md` for the mechanism and why
+the rates default to zero (`SWAP_LONG_PIPS_PER_NIGHT` / `SWAP_SHORT_PIPS_PER_NIGHT`
+per pair). It's already subtracted from both backtest and paper-trade P&L
+once you fill in real numbers from your Exness account.
 
 ## The numbers that actually mattered in the source material
 
