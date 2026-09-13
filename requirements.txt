@@ -1,0 +1,8 @@
+pandas>=2.0
+numpy>=1.24
+python-dotenv>=1.0
+requests>=2.31
+
+# Windows-only (or Linux+Wine), needed only for the Exness broker/data adapter.
+# Uncomment once you're set up per docs/EXNESS_INTEGRATION.md:
+# MetaTrader5>=5.0.45
