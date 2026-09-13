@@ -97,9 +97,24 @@ leverage/margin math against your actual account.
 same-day P&L to automatically pause new signals once the cap is hit --
 apply it manually until that's wired up.
 
-## MT5/Exness adapter cannot be exercised in this development environment
+## MT5/Exness adapter is hardened and offline-tested, not live-verified
 
-Written and reviewed here, but this sandbox has no Windows and no MT5
-terminal to actually run it against. See `docs/EXNESS_INTEGRATION.md` for
-exactly what running it for real requires, and test it on a real machine
-against a demo Exness account before trusting it with a live one.
+`fx_engine/broker/exness_mt5.py` was rewritten to handle the failure
+modes that would otherwise surface for the first time on a real account:
+a terminal already logged into the wrong account (explicit `mt5.login()`
+recovery rather than silently using the wrong account), transient
+`initialize()`/`copy_rates_range()` failures (retry with backoff), an
+unrecognized symbol (a clear error naming Exness's common `.raw`/`.pro`
+suffix pattern instead of an opaque "no data"), and a stale tick (logged,
+not treated as fatal, since a flat weekend market legitimately has an old
+last tick). All of it is verified in `tests/test_exness_mt5.py` (15
+tests) against a fake `MetaTrader5` module injected into `sys.modules` --
+real control-flow logic, fake terminal.
+
+What that testing cannot do: verify the real `MetaTrader5` package or a
+real MT5 terminal, because the package has no Linux/macOS build at all
+(confirmed against PyPI's JSON API: every release, every supported Python
+version, is `win_amd64`-only -- see `docs/EXNESS_INTEGRATION.md`) and this
+sandbox has no Windows. Test it on a real Windows machine against a demo
+Exness account -- see `docs/EXNESS_INTEGRATION.md` -- before trusting it
+with a live one.

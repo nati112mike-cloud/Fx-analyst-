@@ -12,25 +12,58 @@ official `MetaTrader5` package.
 This is true for essentially every retail forex broker, not something
 specific to Exness -- worth knowing generally, not just for this project.
 
+**Confirmed directly against PyPI's JSON API while building this
+integration** (`https://pypi.org/pypi/MetaTrader5/json`): every published
+release of the `MetaTrader5` package, for every supported Python version
+from 3.6 through 3.14, ships as a `win_amd64` wheel. There is no
+Linux/macOS wheel and no source distribution at all -- `pip install
+MetaTrader5` cannot succeed on Linux or macOS, full stop, not even to get
+a broken/degraded install. This isn't a Windows *recommendation*, it's a
+hard platform requirement.
+
 ## What that means practically
 
-- The `MetaTrader5` Python package is officially supported on **Windows
-  only**. It works by calling into the terminal's local API, not over the
-  network. Linux support exists unofficially via Wine (running the
-  Windows MT5 terminal under Wine, then the Windows build of Python +
-  `MetaTrader5` also under Wine, talking to it) -- more fragile, but a
-  documented community path if you're deploying on Linux.
-- This sandboxed development container has neither Windows nor a
-  installable MT5 terminal, so `fx_engine/broker/exness_mt5.py` could be
-  *written and reviewed* here but not *run* here. Its import is guarded:
-  importing the module elsewhere in the codebase never fails; only
-  instantiating `MT5DataProvider` / `ExnessMT5Adapter` without the package
-  installed and a terminal running raises a clear `RuntimeError` telling
-  you exactly what's missing.
+- The `MetaTrader5` Python package only installs and runs on **Windows**
+  (natively, or under Wine running a Windows Python interpreter). It
+  works by calling into the terminal's local API, not over the network.
+- This sandboxed development container has neither Windows nor an
+  installable MT5 terminal (confirmed above), so `fx_engine/broker/exness_mt5.py`
+  was *written and reviewed* here but not *run against a real terminal*
+  here. Its import is guarded: importing the module elsewhere in the
+  codebase never fails; only instantiating `MT5DataProvider` /
+  `ExnessMT5Adapter` without the package installed and a terminal running
+  raises a clear `RuntimeError` telling you exactly what's missing.
+- What *could* be verified here: the adapter's actual control flow --
+  initialize/retry, detecting and recovering from a terminal that's
+  logged into the wrong account, symbol validation, and retrying
+  transient empty responses -- was exercised against a fake `MetaTrader5`
+  module standing in for the real one (`tests/test_exness_mt5.py`, 15
+  tests, all passing). That proves the adapter's logic is sound; it does
+  not prove the real terminal integration works end-to-end, which needs
+  a real Windows run. See `docs/PERFORMANCE.md`.
 - Your eventual 24/7 host (see `docs/DEPLOYMENT.md`) needs to be a
   Windows machine (a small Windows VPS is the common choice for this
   exact use case) or Linux+Wine -- not a plain Linux box making HTTP
   calls.
+
+## What the adapter now handles (verified in `tests/test_exness_mt5.py`)
+
+- **Wrong-account recovery**: if a MT5 terminal is already running but
+  logged into a different account than `EXNESS_MT5_LOGIN` (common on a
+  shared VPS, or a terminal you opened manually before starting this),
+  the adapter detects the mismatch and explicitly calls `mt5.login()` to
+  switch to the configured account, rather than silently operating
+  against the wrong one.
+- **Retry with backoff** on `initialize()` and `copy_rates_range()`, since
+  both can transiently fail while the terminal reconnects to Exness's
+  servers.
+- **Symbol validation before use**: `symbol_info()`/`symbol_select()` are
+  checked before any tick/rate call, and a missing symbol raises an error
+  that explicitly names the common Exness suffix gotcha below, rather
+  than an opaque "no data."
+- **Stale-tick logging** (not a hard failure, since a flat weekend/holiday
+  market legitimately has an old last tick): `get_quote()` logs a warning
+  if the tick is more than 5 minutes old.
 
 ## Setup steps (do this on a Windows machine or VPS)
 

@@ -67,16 +67,49 @@ is verified correct against the schema, but has never actually been
 exercised against the live endpoint. That's the next milestone, from a
 machine with normal internet access.
 
+## MT5/Exness adapter: hardened and offline-tested, not live-tested
+
+Confirmed against PyPI's JSON API (`https://pypi.org/pypi/MetaTrader5/json`)
+while building this integration: every published `MetaTrader5` release,
+for every supported Python version (3.6-3.14), ships as a `win_amd64`
+wheel only -- no Linux/macOS wheel, no sdist. `pip install MetaTrader5`
+was attempted in this sandbox and failed exactly as that implies ("No
+matching distribution found"), so the real package cannot even be
+installed here, let alone run against a real terminal.
+
+What was verified instead: `fx_engine/broker/exness_mt5.py`'s actual
+control flow, exercised against a fake `MetaTrader5` module injected into
+`sys.modules` (`tests/test_exness_mt5.py`, 15 tests, all passing) --
+- a terminal already logged into the wrong Exness account triggers an
+  explicit `mt5.login()` switch rather than silently using the wrong one
+  (and a failed switch raises, rather than proceeding anyway);
+- `initialize()` and `copy_rates_range()` retry with backoff on transient
+  failures and raise a clear, diagnosable error once retries are
+  exhausted;
+- an unrecognized symbol raises before any tick/rate call is attempted,
+  naming Exness's common suffix pattern (`.raw`/`.pro`) as the likely
+  cause;
+- a stale tick is logged as a warning, not treated as fatal (a flat
+  weekend market has a legitimately old last tick);
+- the guarded-import behavior (package genuinely absent, the real state
+  in this sandbox) raises a clear `RuntimeError` from every entry point,
+  including `is_connected()` returning `False` rather than raising, and
+  `place_order()` always raising `NotImplementedError` regardless of MT5
+  availability.
+
+This proves the adapter's logic is sound against realistic failure modes;
+it does not prove the real MT5 terminal integration works end-to-end,
+which can only happen on a Windows machine with a live Exness account --
+the next milestone for this piece specifically.
+
 ## What has NOT been verified
 
 - Real market data live end-to-end (Yahoo or MT5/Exness) -- blocked in
   this development sandbox by network policy (see `PROJECT_PLAN.md`
-  section 1; Yahoo specifically is now unit-tested offline, see above).
+  section 1; both are now hardened and unit-tested offline, see above).
   This is the next thing to run, from an environment with normal internet
   access, before drawing any conclusion about real edge.
 - Real Telegram delivery (formatting was verified; `TelegramNotifier.send()`
   needs a real bot token to test the actual HTTP call).
-- The MT5/Exness adapter (needs Windows/Wine + a running terminal, neither
-  available here).
 - Continuous 24/7 operation (needs a real deployment target per
   `docs/DEPLOYMENT.md`).
