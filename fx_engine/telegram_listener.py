@@ -33,13 +33,22 @@ STATE_KEY = "telegram_last_update_id"
 
 def _authorized_texts(updates: list[dict], chat_id: str) -> list[str]:
     texts = []
+    seen_chat_ids = set()
     for u in updates:
         msg = u.get("message") or u.get("edited_message") or {}
-        if str(msg.get("chat", {}).get("id", "")) != str(chat_id):
+        seen_id = str(msg.get("chat", {}).get("id", ""))
+        seen_chat_ids.add(seen_id)
+        if seen_id != str(chat_id):
             continue
         text = (msg.get("text") or "").strip()
         if text:
             texts.append(text)
+    if not texts and seen_chat_ids:
+        # Chat IDs aren't sensitive (unlike the bot token) -- logging them is
+        # what makes a misconfigured TELEGRAM_CHAT_ID diagnosable at all,
+        # rather than a silent "ignored" with no way to tell why.
+        logger.info("saw message(s) from chat id(s) %s, configured TELEGRAM_CHAT_ID is %r -- no match",
+                     sorted(seen_chat_ids), chat_id)
     return texts
 
 

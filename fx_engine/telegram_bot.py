@@ -100,8 +100,12 @@ class SignalMessage:
 
 class TelegramNotifier:
     def __init__(self, bot_token: str | None = None, chat_id: str | None = None):
-        self.bot_token = bot_token or config.TELEGRAM_BOT_TOKEN
-        self.chat_id = chat_id or config.TELEGRAM_CHAT_ID
+        # .strip(): a copy-pasted token/chat ID (e.g. into a GitHub Actions
+        # secret) picking up a trailing newline or space is a common,
+        # otherwise-silent way for this to look "configured" while every
+        # comparison against it quietly fails.
+        self.bot_token = (bot_token or config.TELEGRAM_BOT_TOKEN).strip()
+        self.chat_id = (chat_id or config.TELEGRAM_CHAT_ID).strip()
 
     @property
     def is_configured(self) -> bool:
