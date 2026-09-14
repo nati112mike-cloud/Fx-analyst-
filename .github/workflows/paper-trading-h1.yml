@@ -1,0 +1,73 @@
+name: FX paper trading H1 (forward test)
+
+# Same idea as paper-trading.yml (the H4 track), but for the 1-hour
+# timeframe: a new H1 candle closes every hour, so this runs hourly (5
+# minutes past, giving Yahoo time to publish the closed candle) rather
+# than every 4 hours. Checking more often than a strategy's own timeframe
+# forms new candles wouldn't surface anything new -- see docs/DEPLOYMENT.md.
+#
+# Signals and paper trades from this track are tagged timeframe=H1 in the
+# database (fx_engine/db.py) and labeled "(H1)" in Telegram alerts, kept
+# fully separate from the H4 track's dedup/history -- they're different
+# evidence, not the same signal twice.
+#
+# Before trusting numbers this track produces, see the results from
+# .github/workflows/validate.yml run against H1 -- a real walk-forward
+# check, not just "it runs without crashing."
+#
+# Manual run: Actions tab -> "FX paper trading H1 (forward test)" -> Run workflow.
+
+on:
+  schedule:
+    - cron: "5 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fx-paper-trading  # shared with the H4 track and the Telegram listener --
+                            # all three commit to data/paper_trading.sqlite3.
+  cancel-in-progress: false
+
+env:
+  FX_DB_PATH: data/paper_trading.sqlite3
+  FX_DATA_PROVIDER: yahoo
+
+jobs:
+  paper-trade-h1:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run one H1 paper-trading cycle
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          mkdir -p data
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            echo "Telegram configured -- alerts will be sent."
+            python -m fx_engine.main paper --once --timeframe H1 --telegram
+          else
+            echo "No Telegram secrets set -- printing to logs only."
+            python -m fx_engine.main paper --once --timeframe H1
+          fi
+
+      - name: Commit updated database
+        run: |
+          git config user.name "fx-signal-engine-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/paper_trading.sqlite3
+          git diff --cached --quiet || git commit -m "Automated H1 paper-trading cycle $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push

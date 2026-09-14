@@ -22,6 +22,7 @@ CHECK, DASH = "✅", "➖"
 @dataclass
 class SignalMessage:
     pair: str
+    timeframe: str
     direction: Direction
     overall_signal: str
     score: SignalScore
@@ -51,7 +52,7 @@ class SignalMessage:
             "\U0001F6A8 FOREX SIGNAL",
             "━" * 18,
             "",
-            f"PAIR: {self.pair}",
+            f"PAIR: {self.pair} ({self.timeframe})",
             f"DIRECTION: {emoji} {self.direction.value}",
             "",
             f"SIGNAL SCORE: {self.score.score:.0f}/100  (quality score, NOT a win probability)",

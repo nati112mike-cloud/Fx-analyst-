@@ -23,12 +23,13 @@ docs/LIMITATIONS.md on how long to run this before trusting it.</p>
   <div class="overflow">
   <table>
     <tr>
-      <th>Pair</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Lots</th><th>Risk</th>
+      <th>Pair</th><th>TF</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Lots</th><th>Risk</th>
       <th>Reason</th><th>P&amp;L (R)</th><th>P&amp;L ($)</th><th>Opened (UTC)</th><th>Closed (UTC)</th>
     </tr>
     {% for t in trades %}
     <tr>
       <td>{{ t.pair }}</td>
+      <td class="muted">{{ t.timeframe or "H4" }}</td>
       <td class="{{ 'buy' if t.direction=='BUY' else 'sell' }}">{{ t.direction }}</td>
       <td>{{ "%.5f"|format(t.entry_price) }}</td>
       <td>{{ "%.5f"|format(t.exit_price) if t.exit_price is not none else "-" }}</td>
@@ -45,7 +46,7 @@ docs/LIMITATIONS.md on how long to run this before trusting it.</p>
       <td class="muted">{{ t.exit_time[:19] if t.exit_time else "-" }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="11" class="muted">No paper trades yet -- run `python -m fx_engine.main paper --once`.</td></tr>
+    <tr><td colspan="12" class="muted">No paper trades yet -- run `python -m fx_engine.main paper --once`.</td></tr>
     {% endfor %}
   </table>
   </div>

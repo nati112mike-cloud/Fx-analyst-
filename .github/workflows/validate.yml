@@ -1,0 +1,65 @@
+name: FX strategy validation (on demand)
+
+# Read-only, on-demand: backtests every strategy and then walk-forward
+# validates each one individually, against real data, for a given
+# pair/timeframe. No schedule, nothing committed back -- just prints
+# results to this run's log. Use this BEFORE trusting a new timeframe or
+# pair enough to turn on continuous paper trading for it (see
+# docs/DEPLOYMENT.md and docs/LIMITATIONS.md on why: a strategy's
+# expectancy on a timeframe it wasn't validated on is not evidence of
+# anything).
+#
+# Run it: Actions tab -> "FX strategy validation (on demand)" -> Run
+# workflow -> fill in pair/timeframe/days_back.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pair:
+        description: "Currency pair, e.g. EURUSD"
+        default: "EURUSD"
+      timeframe:
+        description: "M15 | H1 | H4 | D1"
+        default: "H1"
+      days_back:
+        description: "History window in days (Yahoo caps intraday -- M15/H1/H4 -- at ~365 regardless of this)"
+        default: "350"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Backtest every strategy
+        run: |
+          START=$(date -u -d "${{ github.event.inputs.days_back }} days ago" +%Y-%m-%d)
+          END=$(date -u +%Y-%m-%d)
+          echo "Range: $START to $END"
+          python -m fx_engine.main backtest --pair "${{ github.event.inputs.pair }}" --strategy all \
+            --provider yahoo --timeframe "${{ github.event.inputs.timeframe }}" --start "$START" --end "$END"
+
+      - name: Walk-forward validation, one strategy at a time
+        run: |
+          START=$(date -u -d "${{ github.event.inputs.days_back }} days ago" +%Y-%m-%d)
+          END=$(date -u +%Y-%m-%d)
+          for strat in trend_pullback momentum breakout mean_reversion price_action volatility multi_timeframe; do
+            echo ""
+            echo "=================================================================="
+            echo "  $strat on ${{ github.event.inputs.pair }} (${{ github.event.inputs.timeframe }})"
+            echo "=================================================================="
+            python -m fx_engine.main walk-forward --pair "${{ github.event.inputs.pair }}" --strategy "$strat" \
+              --provider yahoo --timeframe "${{ github.event.inputs.timeframe }}" --start "$START" --end "$END"
+          done

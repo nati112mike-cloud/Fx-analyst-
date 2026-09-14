@@ -193,7 +193,8 @@ class SignalEngine:
             logger.warning("position sizing failed for %s: %s", pair, exc)
 
         msg = SignalMessage(
-            pair=pair, direction=direction, overall_signal=ensemble_result.overall_signal, score=score,
+            pair=pair, timeframe=timeframe.value, direction=direction, overall_signal=ensemble_result.overall_signal,
+            score=score,
             ensemble=ensemble_result, regime=snapshot,
             entry_low=min(primary.entry_low, primary.entry_high), entry_high=max(primary.entry_low, primary.entry_high),
             stop_loss=sl, take_profit_1=tp1, take_profit_2=tp2,
@@ -202,11 +203,12 @@ class SignalEngine:
             position_size=position_size, position_size_error=position_size_error,
         )
 
-        if self.db.recent_signal_exists(pair, direction.value, minutes=timeframe.minutes * 2):
+        if self.db.recent_signal_exists(pair, direction.value, timeframe=timeframe.value, minutes=timeframe.minutes * 2):
             return NoTradeReason(pair, "duplicate: a signal for this pair/direction was already sent recently")
 
         signal_id = self.db.insert_signal({
-            "pair": pair, "direction": direction.value, "overall_signal": ensemble_result.overall_signal,
+            "pair": pair, "timeframe": timeframe.value, "direction": direction.value,
+            "overall_signal": ensemble_result.overall_signal,
             "score": score.score, "entry_low": msg.entry_low, "entry_high": msg.entry_high,
             "stop_loss": sl, "take_profit_1": tp1, "take_profit_2": tp2,
             "spread_pips": msg.spread_pips, "regime": snapshot.regime,

@@ -40,6 +40,22 @@ GitHub's own infrastructure:
   analysis on demand -- see "On-demand analysis: just message the bot" in
   `docs/TELEGRAM.md`. It needs the same two secrets and otherwise does
   nothing (no API calls at all) until they're set.
+- A third workflow, `.github/workflows/paper-trading-h1.yml`, runs the same
+  idea on the 1-hour timeframe instead of 4-hour -- hourly instead of every
+  4 hours, since that's how often a new H1 candle actually closes. Signals
+  and trades from this track are tagged `timeframe=H1` in the database and
+  labeled "(H1)" in Telegram alerts, kept fully separate from the H4
+  track's history and duplicate-detection (`fx_engine/db.py`) -- they're
+  different evidence, not the same signal counted twice. All three
+  scheduled workflows share one concurrency group since they all commit to
+  the same `data/paper_trading.sqlite3`.
+- `.github/workflows/validate.yml` is a fourth, on-demand-only workflow
+  (no schedule) for checking a strategy/pair/timeframe combination against
+  real data BEFORE trusting a new paper-trading track: it backtests every
+  strategy and then walk-forward validates each one individually, printing
+  results to the run's log without committing anything. Run it from the
+  Actions tab with your own pair/timeframe/days-back inputs any time you
+  want real evidence before turning something new on.
 - GitHub only fires `schedule` triggers from the workflow file as it
   exists on the repository's default branch -- if you rename or change
   the default branch, this workflow needs to live there too.

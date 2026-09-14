@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS backtests (
 CREATE TABLE IF NOT EXISTS signals (
     id TEXT PRIMARY KEY,
     pair TEXT NOT NULL,
+    timeframe TEXT NOT NULL DEFAULT 'H4',
     direction TEXT NOT NULL,
     overall_signal TEXT NOT NULL,
     score REAL NOT NULL,
@@ -73,6 +74,7 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     signal_id TEXT REFERENCES signals(id),
     pair TEXT NOT NULL,
+    timeframe TEXT NOT NULL DEFAULT 'H4',
     direction TEXT NOT NULL,
     entry_time TEXT NOT NULL,
     entry_price REAL NOT NULL,
@@ -123,6 +125,19 @@ class Database:
     def init_schema(self) -> None:
         with self._conn() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    def _migrate(self, conn) -> None:
+        # `CREATE TABLE IF NOT EXISTS` above only applies to brand-new
+        # databases -- an already-existing one (e.g. the committed
+        # data/paper_trading.sqlite3 from before the H1 track existed) keeps
+        # its old columns, so ALTER TABLE fills in what's missing. Existing
+        # rows default to 'H4' since that's the only timeframe that has ever
+        # run before this column existed.
+        for table in ("signals", "paper_trades"):
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if "timeframe" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN timeframe TEXT NOT NULL DEFAULT 'H4'")
 
     def save_strategy_version(self, name: str, version: str, spec_dict: dict) -> None:
         with self._conn() as conn:
@@ -172,25 +187,28 @@ class Database:
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO signals
-                   (id, pair, direction, overall_signal, score, entry_low, entry_high, stop_loss,
+                   (id, pair, timeframe, direction, overall_signal, score, entry_low, entry_high, stop_loss,
                     take_profit_1, take_profit_2, spread_pips, regime, strategies_agree_json, reason,
                     status, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (signal_id, signal_row["pair"], signal_row["direction"], signal_row["overall_signal"],
-                 signal_row["score"], signal_row.get("entry_low"), signal_row.get("entry_high"),
-                 signal_row.get("stop_loss"), signal_row.get("take_profit_1"), signal_row.get("take_profit_2"),
-                 signal_row.get("spread_pips"), signal_row.get("regime"),
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (signal_id, signal_row["pair"], signal_row.get("timeframe", "H4"), signal_row["direction"],
+                 signal_row["overall_signal"], signal_row["score"], signal_row.get("entry_low"),
+                 signal_row.get("entry_high"), signal_row.get("stop_loss"), signal_row.get("take_profit_1"),
+                 signal_row.get("take_profit_2"), signal_row.get("spread_pips"), signal_row.get("regime"),
                  json.dumps(signal_row.get("strategies_agree", {})), signal_row.get("reason", ""),
                  signal_row.get("status", "PENDING"), datetime.now(timezone.utc).isoformat()),
             )
         return signal_id
 
-    def recent_signal_exists(self, pair: str, direction: str, minutes: int = 240) -> bool:
+    def recent_signal_exists(self, pair: str, direction: str, timeframe: str = "H4", minutes: int = 240) -> bool:
+        # Filtered by timeframe too: an H4 and an H1 track running on the same
+        # pair/direction are different signals from different evidence, and
+        # must not suppress each other.
         with self._conn() as conn:
             row = conn.execute(
-                """SELECT id FROM signals WHERE pair=? AND direction=?
+                """SELECT id FROM signals WHERE pair=? AND direction=? AND timeframe=?
                    AND created_at >= datetime('now', ?) ORDER BY created_at DESC LIMIT 1""",
-                (pair, direction, f"-{minutes} minutes"),
+                (pair, direction, timeframe, f"-{minutes} minutes"),
             ).fetchone()
         return row is not None
 
@@ -212,11 +230,11 @@ class Database:
         with self._conn() as conn:
             cur = conn.execute(
                 """INSERT INTO paper_trades
-                   (signal_id, pair, direction, entry_time, entry_price, stop_loss, take_profit,
-                    lots, risk_amount, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (row.get("signal_id"), row["pair"], row["direction"], row["entry_time"], row["entry_price"],
-                 row["stop_loss"], row["take_profit"], row.get("lots"), row.get("risk_amount"),
-                 datetime.now(timezone.utc).isoformat()),
+                   (signal_id, pair, timeframe, direction, entry_time, entry_price, stop_loss, take_profit,
+                    lots, risk_amount, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (row.get("signal_id"), row["pair"], row.get("timeframe", "H4"), row["direction"],
+                 row["entry_time"], row["entry_price"], row["stop_loss"], row["take_profit"],
+                 row.get("lots"), row.get("risk_amount"), datetime.now(timezone.utc).isoformat()),
             )
             return cur.lastrowid
 

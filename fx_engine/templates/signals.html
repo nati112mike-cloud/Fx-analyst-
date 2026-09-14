@@ -7,13 +7,14 @@
   <div class="overflow">
   <table>
     <tr>
-      <th>Time (UTC)</th><th>Pair</th><th>Dir</th><th>Signal</th><th>Score</th><th>Entry</th>
+      <th>Time (UTC)</th><th>Pair</th><th>TF</th><th>Dir</th><th>Signal</th><th>Score</th><th>Entry</th>
       <th>SL</th><th>TP1</th><th>Spread</th><th>Regime</th><th>Status</th><th>Outcome</th><th>Outcome R</th><th>Reason</th>
     </tr>
     {% for s in signals %}
     <tr>
       <td>{{ s.created_at[:19] }}</td>
       <td>{{ s.pair }}</td>
+      <td class="muted">{{ s.timeframe or "H4" }}</td>
       <td class="{{ 'buy' if s.direction=='BUY' else 'sell' }}">{{ s.direction }}</td>
       <td>{{ s.overall_signal }}</td>
       <td>{{ "%.0f"|format(s.score) }}</td>
@@ -28,7 +29,7 @@
       <td class="muted">{{ s.reason }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="14" class="muted">No signals yet.</td></tr>
+    <tr><td colspan="15" class="muted">No signals yet.</td></tr>
     {% endfor %}
   </table>
   </div>

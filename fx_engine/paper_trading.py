@@ -125,7 +125,8 @@ class PaperTradingLoop:
 
             signal_id, msg = result
             self.engine.db.insert_paper_trade({
-                "signal_id": signal_id, "pair": pair, "direction": msg.direction.value,
+                "signal_id": signal_id, "pair": pair, "timeframe": self.timeframe.value,
+                "direction": msg.direction.value,
                 "entry_time": datetime.now(timezone.utc).isoformat(),
                 "entry_price": (msg.entry_low + msg.entry_high) / 2,
                 "stop_loss": msg.stop_loss, "take_profit": msg.take_profit_1,
